@@ -5,6 +5,9 @@
 -- EXPECT idle -> state_a | mode = MODE_A
 -- EXPECT idle -> state_b | mode = MODE_B
 -- EXPECT idle -> state_c | not (mode = MODE_A) and not (mode = MODE_B)
+-- EXPECT state_a -> idle | (always)
+-- EXPECT state_b -> idle | (always)
+-- EXPECT state_c -> idle | (always)
 
 library IEEE;
 use IEEE.STD_LOGIC_1164.all;

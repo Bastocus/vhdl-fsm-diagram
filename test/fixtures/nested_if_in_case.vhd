@@ -5,6 +5,9 @@
 -- EXPECT idle -> s_mode_a | mode = MODE_A and cond = '1'
 -- EXPECT idle -> s_mode_b | mode = MODE_B and cond = '0'
 -- EXPECT idle -> fallback | not (mode = MODE_A) and not (mode = MODE_B)
+-- EXPECT s_mode_a -> idle | (always)
+-- EXPECT s_mode_b -> idle | (always)
+-- EXPECT fallback -> idle | (always)
 
 library IEEE;
 use IEEE.STD_LOGIC_1164.all;

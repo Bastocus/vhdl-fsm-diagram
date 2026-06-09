@@ -1,9 +1,11 @@
 -- Phase 0 baseline: single-process FSM with simple transitions.
--- Should pass immediately (current parser handles this).
+-- Phase 1 emits the full AND-chain with explicit negation, so the elsif arm now
+-- carries `not (done)` and the unconditional done_state arm is listed too.
 --
 -- EXPECT idle -> running | start = '1'
 -- EXPECT running -> idle | done = '1'
--- EXPECT running -> done_state | error = '1'
+-- EXPECT running -> done_state | not (done) and error = '1'
+-- EXPECT done_state -> idle | (always)
 
 library IEEE;
 use IEEE.STD_LOGIC_1164.all;

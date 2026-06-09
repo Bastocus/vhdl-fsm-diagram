@@ -21,15 +21,13 @@ import * as path from 'path';
 import { VhdlFsmParser, FsmTransition } from '../src/parser';
 
 // Fixtures not yet supported — updated as each phase lands.
+// Phase 1 (recursive parser) landed: nested_if, if_elsif_else, nested_case and
+// nested_if_in_case now pass and have been removed from this list.
 const KNOWN_FAILS = new Set<string>([
-  'two_process',
-  'nested_if',
-  'if_elsif_else',
-  'nested_case',
-  'nested_if_in_case',
-  'when_others',
-  'when_multi_label',
-  'variable_assign',
+  'two_process',        // Phase 2: two-process FSM (group signals by enum type)
+  'when_others',        // Phase 3: expand `when others` to uncovered states
+  'when_multi_label',   // Phase 3: expand `when a | b` to per-label transitions
+  'variable_assign',    // Phase 3: recognise `:=` assignments
 ]);
 
 interface Expected { from: string; to: string; cond: string | null; }

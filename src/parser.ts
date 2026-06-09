@@ -1,15 +1,23 @@
 /**
- * VHDL FSM Parser  v0.2
+ * VHDL FSM Parser  v0.3  (Phase 1 — recursive block parser)
  *
- * Changes vs v0.1:
- *  - Preserves original source case for all identifiers and conditions
- *  - normalised source pads comments with spaces → char offsets match originalSource
- *  - parseCaseBody is depth-aware: nested case statements no longer confuse block
- *    boundaries (fixes "missed transition inside nested case" bug)
- *  - walkTokens emits only the *innermost* (closest enclosing) if/elsif/else condition,
- *    never the full AND-chain
- *  - ELSIF replaces the top-of-stack condition rather than prepending NOT(prev)
- *  - ELSE uses the literal string "else" as the innermost condition
+ * Changes vs v0.2:
+ *  - The flatten-and-walk machinery (tokeniseBlock / walkTokens / flat Token list)
+ *    is replaced by a recursive-descent walker, `parseStatements`, that descends
+ *    into nested `if/elsif/else` and nested `case` constructs.
+ *  - Conditions are now full AND-chains accumulated down the nesting, with explicit
+ *    negation for `elsif`/`else` branches (`if a` → `a`; `elsif b` → `not (a) and b`;
+ *    `else` → `not (a) and not (b)`).
+ *  - Nested `case <sel> is` contributes selector conditions (`sel = V`); a nested
+ *    `when others` contributes the negation chain of the arm's sibling labels.
+ *  - Condition / identifier text is always sliced from `originalSource` at the matched
+ *    offsets so the original source case is preserved.
+ *
+ * Unchanged front-end (kept from v0.2): normalisation/comment-padding, enum & signal
+ * extraction, entity/architecture names, `findMatchingEndCase`, and the various helpers.
+ *
+ * Two-process FSMs (Part B), top-level `when others` / multi-label expansion and `:=`
+ * (Part C) are intentionally NOT handled here — they land in Phases 2 and 3.
  */
 
 export interface FsmState      { name: string; line: number; }
@@ -27,14 +35,20 @@ export interface ParsedFsm {
 
 export interface ParseResult { fsms: ParsedFsm[]; errors: string[]; }
 
-// ── Token types ──────────────────────────────────────────────────────────────
-type TokKind = 'IF' | 'ELSIF' | 'ELSE' | 'END_IF' | 'ASSIGN';
+/** Immutable, per-FSM context threaded through the recursive walker. */
+interface FsmCtx {
+  assignSigs:  Set<string>;          // lowercase signal names that count as a state assignment
+  knownStates: Set<string>;          // lowercase enum state names
+  stateOrig:   Map<string, string>;  // lowercase → original-case state name
+  out:         FsmTransition[];
+}
 
-interface Token {
-  kind:       TokKind;
-  condition?: string;   // IF / ELSIF: condition text (original case)
-  target?:    string;   // ASSIGN: destination state (original case)
-  pos:        number;   // byte offset within the normalised block
+/** One `when` arm of a case statement, located inside the normalised source. */
+interface CaseArm {
+  labelStart: number;   // absolute offset of the label text (after "when ")
+  labelLen:   number;   // length of the label text (up to, excluding "=>")
+  bodyStart:  number;   // absolute offset right after "=>"
+  bodyEnd:    number;   // absolute offset of the next arm / end case
 }
 
 // ── Parser ───────────────────────────────────────────────────────────────────
@@ -141,35 +155,234 @@ export class VhdlFsmParser {
     return signals;
   }
 
-  // ── Transition extraction (outer loop) ───────────────────────────────────
+  // ── Transition extraction (outer driver) ─────────────────────────────────
+  // For each `case <fsmSignal> is`, split the top-level `when` arms to establish the
+  // from-state, then recurse into each arm body with an empty condition stack.
   private extractTransitions(sig: FsmSignal): FsmTransition[] {
-    const out: FsmTransition[] = [];
+    const ctx: FsmCtx = {
+      assignSigs:  new Set([sig.name.toLowerCase()]),
+      knownStates: new Set(sig.states.map(s => s.toLowerCase())),
+      stateOrig:   new Map(sig.states.map(s => [s.toLowerCase(), s])),
+      out:         [],
+    };
 
-    const sigNameLower  = sig.name.toLowerCase();
-    const knownStates   = new Set(sig.states.map(s => s.toLowerCase()));
-    // lowercase → original-case lookup for state names
-    const stateOrigMap  = new Map(sig.states.map(s => [s.toLowerCase(), s]));
-
-    // Find every "case <signal> is" in the normalised source
-    const headerRe = new RegExp(`\\bcase\\s+${escapeRegex(sigNameLower)}\\s+is\\b`, 'g');
+    const headerRe = new RegExp(`\\bcase\\s+${escapeRegex(sig.name.toLowerCase())}\\s+is\\b`, 'g');
     let hm: RegExpExecArray | null;
     while ((hm = headerRe.exec(this.normalised)) !== null) {
       const bodyStart = hm.index + hm[0].length;
       const bodyEnd   = this.findMatchingEndCase(bodyStart);
       if (bodyEnd < 0) continue;
-
-      const normBody = this.normalised.slice(bodyStart, bodyEnd);
-      this.parseCaseBody(normBody, bodyStart, sigNameLower, knownStates, stateOrigMap, out);
+      this.parseTopCase(bodyStart, bodyEnd, ctx);
     }
-    return out;
+    return ctx.out;
   }
 
+  /**
+   * Top-level FSM case: each `when` arm's label is the *from-state*. Recurse into
+   * the arm body with an empty condition stack. (Top-level `when others` and
+   * multi-label arms are expanded in Phase 3 — for now only concrete single-state
+   * labels are processed.)
+   */
+  private parseTopCase(bodyStart: number, bodyEnd: number, ctx: FsmCtx): void {
+    for (const arm of this.splitCaseArms(bodyStart, bodyEnd)) {
+      const labelLower = this.normalised.slice(arm.labelStart, arm.labelStart + arm.labelLen).trim();
+      if (!ctx.knownStates.has(labelLower)) continue;   // others / multi-label → Phase 3
+      const fromState = ctx.stateOrig.get(labelLower)!;
+      this.parseStatements(arm.bodyStart, arm.bodyEnd, [], fromState, ctx);
+    }
+  }
+
+  // ── Recursive statement walker ────────────────────────────────────────────
+  /**
+   * Walk the region [start, end) of the normalised source at one nesting level,
+   * dispatching on the next control construct found at that level:
+   *   - `if … then … [elsif … then …] [else …] end if`
+   *   - `case … is … when … => … end case`
+   *   - `<sig> <= <state> ;` assignment
+   * Each `if`/`case` is consumed whole (up to its matching `end`), so the loop only
+   * ever sees constructs at the current depth; nested ones are handled by recursion.
+   */
+  private parseStatements(
+    start:     number,
+    end:       number,
+    conds:     string[],
+    fromState: string,
+    ctx:       FsmCtx,
+  ): void {
+    const sigAlt = [...ctx.assignSigs].map(escapeRegex).join('|');
+    const re = new RegExp(
+      `\\bif\\b\\s+([\\s\\S]*?)\\s+\\bthen\\b` +
+      `|\\bcase\\b\\s+([\\s\\S]*?)\\s+\\bis\\b` +
+      `|\\b(?:${sigAlt})\\s*<=\\s*(\\w+)\\s*;`,
+      'g',
+    );
+    re.lastIndex = start;
+
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(this.normalised)) !== null && m.index < end) {
+      if (/^if\b/.test(m[0])) {
+        // ── if / elsif / else ──
+        const cond = this.fmtCond(this.sliceCond(m, /^if\s+/, m[1].length));
+        const thenEnd  = m.index + m[0].length;
+        const endIf    = this.findMatchingEndIf(thenEnd);
+        const stop     = endIf < 0 ? end : endIf;
+        this.parseIf(cond, thenEnd, stop, conds, fromState, ctx);
+        re.lastIndex = this.tokenEnd(stop, /\bend\s+if\b/);
+      } else if (/^case\b/.test(m[0])) {
+        // ── case ──
+        const selStart = m.index + /^case\s+/.exec(m[0])![0].length;
+        const headEnd  = m.index + m[0].length;
+        const endCase  = this.findMatchingEndCase(headEnd);
+        const stop     = endCase < 0 ? end : endCase;
+        this.parseCase(selStart, m[2].length, headEnd, stop, conds, fromState, ctx);
+        re.lastIndex = this.tokenEnd(stop, /\bend\s+case\b/);
+      } else {
+        // ── assignment ──
+        const targetLower = m[3].toLowerCase();
+        if (ctx.knownStates.has(targetLower)) {
+          this.emit(fromState, ctx.stateOrig.get(targetLower)!, conds, m.index, ctx);
+        }
+      }
+    }
+  }
+
+  /**
+   * Parse an `if … end if`. The region [thenEnd, endIf) is split at depth-0 `elsif`
+   * and `else` into branches; each branch is recursed with the appropriate guard:
+   *   if c0        → conds + [c0]
+   *   elsif ck     → conds + [not(c0) … not(c_{k-1}), ck]
+   *   else         → conds + [not(c0) … not(c_last)]
+   */
+  private parseIf(
+    c0: string,
+    thenEnd: number,
+    endIf: number,
+    conds: string[],
+    fromState: string,
+    ctx: FsmCtx,
+  ): void {
+    interface Seg { kind: 'if' | 'elsif' | 'else'; cond?: string; bodyStart: number; bodyEnd: number; }
+    const segs: Seg[] = [{ kind: 'if', cond: c0, bodyStart: thenEnd, bodyEnd: endIf }];
+
+    const re = /\bend\s+if\b|\bend\s+case\b|\belsif\b\s+([\s\S]*?)\s+\bthen\b|\belse\b|\bif\b|\bcase\b/g;
+    re.lastIndex = thenEnd;
+    let depth = 0;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(this.normalised)) !== null && m.index < endIf) {
+      const t = m[0];
+      if (/^end/.test(t))                       { depth--; continue; }
+      if (/^if\b/.test(t) || /^case\b/.test(t)) { depth++; continue; }
+      if (depth !== 0) continue;                // elsif/else belonging to a nested if
+
+      segs[segs.length - 1].bodyEnd = m.index;  // close the previous branch
+      if (/^elsif/.test(t)) {
+        const cond = this.fmtCond(this.sliceCond(m, /^elsif\s+/, m[1].length));
+        segs.push({ kind: 'elsif', cond, bodyStart: m.index + t.length, bodyEnd: endIf });
+      } else {
+        segs.push({ kind: 'else', bodyStart: m.index + t.length, bodyEnd: endIf });
+      }
+    }
+
+    const prior: string[] = [];   // conditions of preceding branches, for negation
+    for (const seg of segs) {
+      let guard: string[];
+      if (seg.kind === 'if') {
+        guard = [seg.cond!];
+        prior.push(seg.cond!);
+      } else if (seg.kind === 'elsif') {
+        guard = [...prior.map(c => this.negate(c)), seg.cond!];
+        prior.push(seg.cond!);
+      } else {
+        guard = prior.map(c => this.negate(c));
+      }
+      this.parseStatements(seg.bodyStart, seg.bodyEnd, conds.concat(guard), fromState, ctx);
+    }
+  }
+
+  /**
+   * Parse a `case … end case`. Each arm contributes a selector condition:
+   *   `when V`        → `sel = V`
+   *   `when V1 | V2`  → `(sel = V1 or sel = V2)`
+   *   `when others`   → `not (sel = A) and not (sel = B) …` over sibling labels
+   * The from-state is inherited from the enclosing FSM arm (a nested case never
+   * changes the from-state).
+   */
+  private parseCase(
+    selStart: number,
+    selLen: number,
+    bodyStart: number,
+    bodyEnd: number,
+    conds: string[],
+    fromState: string,
+    ctx: FsmCtx,
+  ): void {
+    const sel  = this.fmtCond(this.originalAt(selStart, selLen));
+    const arms = this.splitCaseArms(bodyStart, bodyEnd);
+
+    // Sibling concrete labels, used to build the `others` negation chain.
+    const covered: string[] = [];
+    for (const a of arms) {
+      const lower = this.normalised.slice(a.labelStart, a.labelStart + a.labelLen).trim();
+      if (lower === 'others') continue;
+      const orig = this.originalAt(a.labelStart, a.labelLen).trim();
+      for (const part of orig.split('|')) covered.push(part.trim());
+    }
+
+    for (const a of arms) {
+      const lower = this.normalised.slice(a.labelStart, a.labelStart + a.labelLen).trim();
+      let selConds: string[];
+      if (lower === 'others') {
+        selConds = covered.map(v => this.negate(`${sel} = ${v}`));
+      } else {
+        const parts = this.originalAt(a.labelStart, a.labelLen).trim()
+          .split('|').map(s => s.trim()).filter(Boolean);
+        selConds = parts.length === 1
+          ? [`${sel} = ${parts[0]}`]
+          : ['(' + parts.map(v => `${sel} = ${v}`).join(' or ') + ')'];
+      }
+      this.parseStatements(a.bodyStart, a.bodyEnd, conds.concat(selConds), fromState, ctx);
+    }
+  }
+
+  // ── Emit a transition (with de-dup on from|to|condition) ──────────────────
+  private emit(from: string, to: string, conds: string[], offset: number, ctx: FsmCtx): void {
+    const condition = this.joinConds(conds);
+    const line      = this.offsetToLine(offset);
+    const dup = ctx.out.some(t => t.from === from && t.to === to && t.condition === condition);
+    if (!dup) ctx.out.push({ from, to, condition, line });
+  }
+
+  // ── Case-arm splitter (depth-aware) ───────────────────────────────────────
+  /**
+   * Split the case body [start, end) into its top-level `when` arms. Nested
+   * `if`/`case` increment a depth counter so their inner `when`s are skipped.
+   */
+  private splitCaseArms(start: number, end: number): CaseArm[] {
+    const re = /\bend\s+case\b|\bend\s+if\b|\bcase\b|\bif\b|\bwhen\b\s+([\s\S]*?)\s*=>/g;
+    re.lastIndex = start;
+    let depth = 0;
+    const arms: CaseArm[] = [];
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(this.normalised)) !== null && m.index < end) {
+      const t = m[0];
+      if (/^end/.test(t))                       { depth--; continue; }
+      if (/^case\b/.test(t) || /^if\b/.test(t)) { depth++; continue; }
+      if (depth !== 0) continue;                // `when` of a nested case
+
+      const labelStart = m.index + /^when\s+/.exec(t)![0].length;
+      if (arms.length) arms[arms.length - 1].bodyEnd = m.index;
+      arms.push({ labelStart, labelLen: m[1].length, bodyStart: m.index + t.length, bodyEnd: end });
+    }
+    if (arms.length) arms[arms.length - 1].bodyEnd = end;
+    return arms;
+  }
+
+  // ── Block-matching helpers ────────────────────────────────────────────────
   /**
    * Walk forward from `from` in normalised, tracking `case` depth, and
    * return the index of the `end case` that closes depth 1.
    */
   private findMatchingEndCase(from: number): number {
-    // Match end-case before bare case so "end case" doesn't get counted as "case"
     const re = /\bend\s+case\b|\bcase\b/g;
     re.lastIndex = from;
     let depth = 1;
@@ -181,213 +394,46 @@ export class VhdlFsmParser {
     return -1;
   }
 
-  // ── Case body parser (depth-aware) ────────────────────────────────────────
-  /**
-   * Split the case body into "when X =>" blocks, but only at depth 0.
-   * Nested case statements increment depth, so their `when` keywords are skipped.
-   * This fixes the missed-transition bug when a `when` block contains a nested case.
-   */
-  private parseCaseBody(
-    normBody:    string,
-    bodyOffset:  number,
-    sigNameLower: string,
-    knownStates:  Set<string>,
-    stateOrigMap: Map<string, string>,
-    out:          FsmTransition[]
-  ): void {
-    // Scan for: end case (depth--), case (depth++), when X => at depth 0
-    const scanRe = /\bend\s+case\b|\bcase\b|\bwhen\s+(\w+)\s*=>/g;
-    let depth = 0;
-
-    interface WhenEntry {
-      stateLower:   string;
-      origState:    string;
-      whenStart:    number;   // offset of "when" keyword in normBody
-      contentStart: number;   // offset right after "=>"
-    }
-    const entries: WhenEntry[] = [];
-    let sm: RegExpExecArray | null;
-
-    while ((sm = scanRe.exec(normBody)) !== null) {
-      const full = sm[0];
-      if      (/^end\s+case/.test(full)) { if (depth > 0) depth--; }
-      else if (/^case/.test(full))       { depth++; }
-      else if (depth === 0 && sm[1]) {
-        // "when X =>" at top level
-        const stateLower = sm[1].toLowerCase();
-        // Recover original case from the same position in originalSource
-        const origState  = stateOrigMap.get(stateLower)
-          ?? this.originalAt(bodyOffset + sm.index + full.indexOf(sm[1]), sm[1].length);
-        entries.push({
-          stateLower,
-          origState,
-          whenStart:    sm.index,
-          contentStart: sm.index + full.length,
-        });
-      }
-    }
-
-    for (let i = 0; i < entries.length; i++) {
-      const { stateLower, origState, contentStart } = entries[i];
-      if (!knownStates.has(stateLower)) continue;
-
-      const blockEnd   = i + 1 < entries.length ? entries[i + 1].whenStart : normBody.length;
-      const normBlock  = normBody.slice(contentStart, blockEnd);
-      const origBlock  = this.originalSource.slice(bodyOffset + contentStart, bodyOffset + blockEnd);
-
-      this.processBlock(normBlock, origBlock, bodyOffset + contentStart,
-                        origState, sigNameLower, knownStates, stateOrigMap, out);
-    }
-  }
-
-  // ── Block processor ───────────────────────────────────────────────────────
-  private processBlock(
-    normBlock:    string,
-    origBlock:    string,
-    blockOffset:  number,
-    fromState:    string,
-    sigNameLower: string,
-    knownStates:  Set<string>,
-    stateOrigMap: Map<string, string>,
-    out:          FsmTransition[]
-  ): void {
-    const tokens = this.tokeniseBlock(normBlock, origBlock, sigNameLower, knownStates, stateOrigMap);
-    this.walkTokens(tokens, fromState, blockOffset, out);
-  }
-
-  // ── Tokeniser ─────────────────────────────────────────────────────────────
-  /**
-   * Produce a flat list of IF/ELSIF/ELSE/END_IF/ASSIGN tokens from one when-block.
-   *
-   * normBlock: lowercase, comment-padded (for pattern matching)
-   * origBlock: original source at the same offsets (for extracting display text)
-   *
-   * Note: nested case/end-case tokens are intentionally ignored here.
-   * Their presence doesn't break if/end-if balance because VHDL requires
-   * end-if inside the case when branches, so the depths stay correct.
-   */
-  private tokeniseBlock(
-    normBlock:    string,
-    origBlock:    string,
-    sigNameLower: string,
-    knownStates:  Set<string>,
-    stateOrigMap: Map<string, string>
-  ): Token[] {
-    const tokens: Token[] = [];
-
-    // Combined pattern. end-if MUST come before bare if in the alternation.
-    const masterRe = new RegExp(
-      `\\bend\\s+if\\b` +
-      `|\\belsif\\s+([\\s\\S]+?)\\s+then\\b` +
-      `|\\belse\\b(?!\\s*\\bif\\b)` +
-      `|\\bif\\s+([\\s\\S]+?)\\s+then\\b` +
-      `|\\b${escapeRegex(sigNameLower)}\\s*<=\\s*(\\w+)\\s*;`,
-      'g'
-    );
-
+  /** Mirror of findMatchingEndCase for `if` / `end if` (elsif does not nest). */
+  private findMatchingEndIf(from: number): number {
+    const re = /\bend\s+if\b|\bif\b/g;
+    re.lastIndex = from;
+    let depth = 1;
     let m: RegExpExecArray | null;
-    while ((m = masterRe.exec(normBlock)) !== null) {
-      const full     = m[0];
-      const pos      = m.index;
-      // Slice the same span from the original (case-preserving) block
-      const origFull = origBlock.slice(pos, pos + full.length);
-
-      if (/^end\s+if/.test(full)) {
-        tokens.push({ kind: 'END_IF', pos });
-
-      } else if (/^elsif/.test(full)) {
-        const cm = /^elsif\s+([\s\S]+?)\s+then$/i.exec(origFull);
-        tokens.push({ kind: 'ELSIF', condition: (cm ? cm[1] : m[1] ?? '').trim(), pos });
-
-      } else if (/^else/.test(full)) {
-        tokens.push({ kind: 'ELSE', pos });
-
-      } else if (/^if/.test(full)) {
-        const cm = /^if\s+([\s\S]+?)\s+then$/i.exec(origFull);
-        tokens.push({ kind: 'IF', condition: (cm ? cm[1] : m[2] ?? '').trim(), pos });
-
-      } else {
-        // Assignment: sigName <= targetState ;
-        // Extract target from origFull to preserve case
-        const assignRe = new RegExp(`^${escapeRegex(sigNameLower)}\\s*<=\\s*(\\w+)\\s*;`, 'i');
-        const cm = assignRe.exec(origFull);
-        const target = cm ? cm[1].trim() : (m[3] ?? '').trim();
-        if (target && knownStates.has(target.toLowerCase())) {
-          // Resolve to original-case state name
-          tokens.push({
-            kind:   'ASSIGN',
-            target: stateOrigMap.get(target.toLowerCase()) ?? target,
-            pos,
-          });
-        }
-      }
+    while ((m = re.exec(this.normalised)) !== null) {
+      if (/^end\s+if/.test(m[0])) { if (--depth === 0) return m.index; }
+      else                        { depth++; }
     }
-    return tokens;
+    return -1;
   }
 
-  // ── Token walker – emits innermost condition only ─────────────────────────
-  /**
-   * Walk the flat token list with a condition stack.
-   * condStack[top] = the condition of the *immediately* enclosing if/elsif/else.
-   *
-   * On ASSIGN we emit condStack[top] (not a join of the whole stack), which
-   * satisfies requirement 1: "show only the innermost condition".
-   *
-   * ELSIF replaces the top entry (new condition only, no NOT(prev) prefix).
-   * ELSE  replaces the top entry with the string "else".
-   */
-  private walkTokens(
-    tokens:      Token[],
-    fromState:   string,
-    blockOffset: number,
-    out:         FsmTransition[]
-  ): void {
-    const condStack: string[] = [];
-
-    for (const tok of tokens) {
-      switch (tok.kind) {
-        case 'IF':
-          condStack.push(this.fmtCond(tok.condition ?? ''));
-          break;
-
-        case 'ELSIF':
-          // Replace top with just this new condition (innermost only)
-          if (condStack.length > 0) {
-            condStack[condStack.length - 1] = this.fmtCond(tok.condition ?? '');
-          } else {
-            condStack.push(this.fmtCond(tok.condition ?? ''));
-          }
-          break;
-
-        case 'ELSE':
-          // The direct cause of this branch is "else"; no condition expression
-          if (condStack.length > 0) {
-            condStack[condStack.length - 1] = 'else';
-          }
-          break;
-
-        case 'END_IF':
-          condStack.pop();
-          break;
-
-        case 'ASSIGN': {
-          // Innermost condition = top of stack; empty stack = unconditional
-          const cond = condStack.length > 0 ? condStack[condStack.length - 1] : '(always)';
-          const line = this.offsetToLine(blockOffset + tok.pos);
-
-          const dup = out.some(t =>
-            t.from === fromState && t.to === tok.target! && t.condition === cond
-          );
-          if (!dup) {
-            out.push({ from: fromState, to: tok.target!, condition: cond, line });
-          }
-          break;
-        }
-      }
-    }
+  /** Length-aware end of a closing token (`end if` / `end case`) starting at `idx`. */
+  private tokenEnd(idx: number, token: RegExp): number {
+    const re = new RegExp(token.source, 'y');
+    re.lastIndex = idx;
+    const m = re.exec(this.normalised);
+    return m ? idx + m[0].length : idx;
   }
 
   // ── Helpers ───────────────────────────────────────────────────────────────
+
+  /** Slice the captured group of `m` from originalSource, given the match's prefix. */
+  private sliceCond(m: RegExpExecArray, prefix: RegExp, len: number): string {
+    const start = m.index + prefix.exec(m[0])![0].length;
+    return this.originalAt(start, len);
+  }
+
+  /** Negate a single condition. `x = '1'` → `not (x)`; anything else → `not (cond)`. */
+  private negate(cond: string): string {
+    const m = /^(.+?)\s*=\s*'1'$/.exec(cond);
+    return m ? `not (${m[1].trim()})` : `not (${cond})`;
+  }
+
+  /** Join an AND-chain of conditions; empty chain → "(always)". */
+  private joinConds(conds: string[]): string {
+    const parts = conds.filter(Boolean);
+    return parts.length ? parts.join(' and ') : '(always)';
+  }
 
   /** Normalise whitespace in a condition string; preserve original case. */
   private fmtCond(raw: string): string {

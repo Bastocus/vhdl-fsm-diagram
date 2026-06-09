@@ -1,8 +1,11 @@
 -- Phase 1: deeply nested if/elsif/else.
--- Parser v0.2 reports only the innermost condition; Phase 1 will emit the full AND-chain.
+-- Parser v0.2 reports only the innermost condition; Phase 1 emits the full AND-chain.
+-- Condition text is sliced verbatim from the source, so `error = '0'` stays literal
+-- (matching the parallel `cond = '0'` case in nested_if_in_case.vhd).
 --
 -- EXPECT idle -> running | enable = '1' and go = '1'
--- EXPECT running -> done | done = '1' and not (error)
+-- EXPECT running -> done | done = '1' and error = '0'
+-- EXPECT done -> idle | (always)
 
 library IEEE;
 use IEEE.STD_LOGIC_1164.all;
