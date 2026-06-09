@@ -1,0 +1,13 @@
+node_modules/
+out/
+dist/
+*.js
+*.js.map
+*.d.ts
+.vscode-test/
+*.swp
+*.swo
+*~
+.DS_Store
+.env
+.env.local

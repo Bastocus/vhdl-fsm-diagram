@@ -18,7 +18,7 @@
  */
 import * as fs from 'fs';
 import * as path from 'path';
-import { VhdlFsmParser, FsmTransition } from '../parser';
+import { VhdlFsmParser, FsmTransition } from '../src/parser';
 
 // Fixtures not yet supported — updated as each phase lands.
 const KNOWN_FAILS = new Set<string>([
