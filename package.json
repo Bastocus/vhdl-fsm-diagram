@@ -3,6 +3,10 @@
   "displayName": "VHDL FSM Visualizer",
   "description": "Detects finite state machines in VHDL files and renders an interactive diagram with transitions",
   "version": "0.3.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Bastocus/vhdl-fsm-visualizer.git"
+  },
   "engines": {
     "vscode": "^1.85.0"
   },
