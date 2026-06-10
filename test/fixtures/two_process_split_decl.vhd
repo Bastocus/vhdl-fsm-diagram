@@ -1,11 +1,10 @@
 -- Phase 2 corner case: two-process FSM whose signals are declared on SEPARATE
 -- lines (not a comma list). The enum-type grouping must still merge them so the
 -- `case current_state is` selector and the `next_state <= …` assignments belong to
--- one FSM. Conditions follow the Phase-1 convention (AND-chain + explicit negation,
--- every assignment emitted including self-loop / unconditional arms).
+-- one FSM. Conditions follow the Phase-1 convention (AND-chain + explicit negation).
+-- Self-loops are filtered out (issue #3).
 --
 -- EXPECT idle -> active | en = '1'
--- EXPECT idle -> idle | not (en)
 -- EXPECT active -> idle | (always)
 
 library IEEE;

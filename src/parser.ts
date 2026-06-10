@@ -384,7 +384,9 @@ export class VhdlFsmParser {
   }
 
   // ── Emit a transition (with de-dup on from|to|condition) ──────────────────
+  // Self-loops (from === to) are filtered out (issue #3) as they clutter the diagram.
   private emit(from: string, to: string, conds: string[], offset: number, ctx: FsmCtx): void {
+    if (from === to) return;  // ignore self-loops
     const condition = this.joinConds(conds);
     const line      = this.offsetToLine(offset);
     const dup = ctx.out.some(t => t.from === from && t.to === to && t.condition === condition);

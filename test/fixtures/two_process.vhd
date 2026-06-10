@@ -1,14 +1,12 @@
 -- Phase 2: two-process FSM (case on current_state, assign next_state).
 -- The parser groups signals by enum type, so `case current_state is` + the
 -- `next_state <= …` assignments merge into one FSM. Conditions follow the Phase-1
--- convention (full AND-chain, explicit negation for elsif/else, every assignment
--- emitted including unconditional and self-loop arms).
+-- convention (full AND-chain, explicit negation for elsif/else). Self-loops are
+-- filtered out (issue #3).
 --
 -- EXPECT idle -> running | go = '1'
--- EXPECT idle -> idle | not (go)
 -- EXPECT running -> done | is_done = '1'
 -- EXPECT running -> idle | not (is_done) and stop = '1'
--- EXPECT running -> running | not (is_done) and not (stop)
 -- EXPECT done -> idle | (always)
 
 library IEEE;
