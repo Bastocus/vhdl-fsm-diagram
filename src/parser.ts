@@ -468,10 +468,55 @@ export class VhdlFsmParser {
     return m ? `not (${m[1].trim()})` : `not (${cond})`;
   }
 
-  /** Join an AND-chain of conditions; empty chain → "(always)". */
+  /**
+   * Join an AND-chain of conditions; empty chain → "(always)".
+   * When ANDing 2+ conditions, a part containing a top-level `or`/`xor`/`nor`/
+   * `xnor`/`nand` (lower precedence than `and`) is wrapped in parentheses —
+   * unless already fully parenthesized — so `if a or b` nested inside `if c`
+   * yields `(a or b) and c`, not the ambiguous `a or b and c` (issue #1).
+   */
   private joinConds(conds: string[]): string {
     const parts = conds.filter(Boolean);
-    return parts.length ? parts.join(' and ') : '(always)';
+    if (parts.length === 0) return '(always)';
+    if (parts.length === 1) return parts[0];
+    return parts.map(c => this.parenthesizeForAnd(c)).join(' and ');
+  }
+
+  /** Wrap `cond` in parens if it has a top-level low-precedence operator and
+   *  isn't already fully parenthesized. */
+  private parenthesizeForAnd(cond: string): string {
+    if (this.isFullyParenthesized(cond)) return cond;
+    return this.hasTopLevelLowPrecOp(cond) ? `(${cond})` : cond;
+  }
+
+  /** True if `s` is wrapped in one matching pair of parens spanning the whole
+   *  string, e.g. `(a or b)` but not `(a) or (b)`. */
+  private isFullyParenthesized(s: string): boolean {
+    if (!s.startsWith('(') || !s.endsWith(')')) return false;
+    let depth = 0;
+    for (let i = 0; i < s.length; i++) {
+      if (s[i] === '(') depth++;
+      else if (s[i] === ')') {
+        depth--;
+        if (depth === 0) return i === s.length - 1;
+      }
+    }
+    return false;
+  }
+
+  /** True if `s` contains `or`/`xor`/`nor`/`xnor`/`nand` at paren depth 0 —
+   *  operators whose precedence relative to `and` makes ANDing `s` as-is
+   *  ambiguous. */
+  private hasTopLevelLowPrecOp(s: string): boolean {
+    let depth = 0;
+    const re = /\(|\)|\b(?:or|nor|xor|xnor|nand)\b/gi;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(s)) !== null) {
+      if (m[0] === '(') depth++;
+      else if (m[0] === ')') depth--;
+      else if (depth === 0) return true;
+    }
+    return false;
   }
 
   /** Normalise whitespace in a condition string; preserve original case. */
