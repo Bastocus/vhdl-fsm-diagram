@@ -373,7 +373,8 @@ function render(){
   // Build a set of directed keys so we can detect bidirectional pairs.
   const directedSet=new Set(grouped.map(e=>e.from+'|||'+e.to));
 
-  // Is "name" a kept neighbor of "selected" under the current focusMode?
+  // Is "name" a kept neighbor (state circle stays undimmed) of "selected"
+  // under the current focusMode?
   //   0: any edge between selected and name (either direction)
   //   1: outgoing only - selected -> name
   //   2: incoming only - name -> selected
@@ -383,6 +384,18 @@ function render(){
     return directedSet.has(selected+'|||'+name)||directedSet.has(name+'|||'+selected);
   }
 
+  // Is this specific edge highlighted under the current focusMode? Unlike
+  // isKeptNeighbor (which can keep a *state* visible via a different edge),
+  // an edge is only highlighted if it matches the mode's own direction.
+  //   0: edge touches selected (either direction)
+  //   1: outgoing only - edge.from === selected
+  //   2: incoming only - edge.to === selected
+  function isEdgeHL(edge){
+    if(focusMode===1) return edge.from===selected;
+    if(focusMode===2) return edge.to===selected;
+    return edge.from===selected||edge.to===selected;
+  }
+
   // ── Draw edges ───────────────────────────────────────────────────────
   const eGrp=el('g');
 
@@ -390,8 +403,7 @@ function render(){
     const fp=pos[edge.from], tp=pos[edge.to];
     if(!fp) return;
 
-    const other=edge.from===selected?edge.to:edge.to===selected?edge.from:null;
-    const isHL =selected&&other!==null&&isKeptNeighbor(other);
+    const isHL =selected&&isEdgeHL(edge);
     const isDim=selected&&!isHL;
 
     const isSelf=edge.isSelf;
