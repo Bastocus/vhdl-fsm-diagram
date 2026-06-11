@@ -4,6 +4,8 @@
 -- EXPECT s1 -> done | (always)
 -- EXPECT s2 -> done | (always)
 -- EXPECT s3 -> idle | (always)
+-- EXPECT done -> idle | (always)
+-- EXPECT idle -> s1 | (always)
 
 library IEEE;
 use IEEE.STD_LOGIC_1164.all;

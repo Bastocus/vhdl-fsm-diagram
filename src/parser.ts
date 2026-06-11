@@ -1,5 +1,15 @@
 /**
- * VHDL FSM Parser  v0.4  (Phase 2 — two-process FSM support)
+ * VHDL FSM Parser  v0.5  (Phase 3 — `when others` / multi-label / `:=`)
+ *
+ * Changes vs v0.4 (Phase 3, Part C):
+ *  - Top-level `when others =>` arms expand to one transition set per *uncovered*
+ *    state (every enum state not named by another top-level `when` arm) — no
+ *    pseudo-node, every from/to stays a real declared state.
+ *  - Top-level `when s1 | s2 =>` arms expand to one transition set per labelled
+ *    state, each with `from` = that state.
+ *  - `extractFsmSignals` also collects `variable` declarations of the FSM's enum
+ *    type (e.g. a `next_state` variable), and assignments recognise `:=` as well
+ *    as `<=`, so `next_state := running;` is treated like a state assignment.
  *
  * Changes vs v0.3 (Phase 2, Part B):
  *  - FSMs are keyed by enum **type**, not by a single signal. All signals of the
@@ -26,8 +36,6 @@
  * Unchanged front-end (kept from v0.2): normalisation/comment-padding, enum & signal
  * extraction, entity/architecture names, `findMatchingEndCase`, and the various helpers.
  *
- * Two-process FSMs (Part B), top-level `when others` / multi-label expansion and `:=`
- * (Part C) are intentionally NOT handled here — they land in Phases 2 and 3.
  */
 
 export interface FsmState      { name: string; line: number; }
@@ -161,10 +169,12 @@ export class VhdlFsmParser {
   // ── FSM signals (grouped by enum type) ────────────────────────────────────
   // One group per enum type, collecting *all* signals of that type so two-process
   // designs (`current_state` selected, `next_state` assigned) merge into one FSM.
+  // Also collects `variable` declarations of the same enum type (Phase 3, Part C),
+  // so a `next_state` variable assigned via `:=` is treated as part of the group.
   // The declaration regex captures comma lists (`signal a, b : state_t;`).
   private extractFsmSignals(enumTypes: Map<string, string[]>): FsmSignal[] {
     const groups = new Map<string, FsmSignal>();   // key = type name (lowercase)
-    const re = /\bsignal\s+([\w\s,]+?)\s*:\s*(\w+)(?:\s*:=\s*[^;]+?)?\s*;/gi;
+    const re = /\b(?:signal|variable)\s+([\w\s,]+?)\s*:\s*(\w+)(?:\s*:=\s*[^;]+?)?\s*;/gi;
     let m: RegExpExecArray | null;
     while ((m = re.exec(this.originalSource)) !== null) {
       const typeName = m[2].trim();
@@ -218,16 +228,39 @@ export class VhdlFsmParser {
 
   /**
    * Top-level FSM case: each `when` arm's label is the *from-state*. Recurse into
-   * the arm body with an empty condition stack. (Top-level `when others` and
-   * multi-label arms are expanded in Phase 3 — for now only concrete single-state
-   * labels are processed.)
+   * the arm body with an empty condition stack, once per from-state:
+   *   - `when s1 | s2 =>` recurses once per labelled state (Part C).
+   *   - `when others =>` recurses once per state not named by another top-level
+   *     arm — no pseudo-node, every from/to stays a real declared state (Part C).
    */
   private parseTopCase(bodyStart: number, bodyEnd: number, ctx: FsmCtx): void {
-    for (const arm of this.splitCaseArms(bodyStart, bodyEnd)) {
+    const arms = this.splitCaseArms(bodyStart, bodyEnd);
+
+    // States covered by an explicit (non-`others`) label, for the `others` expansion.
+    const covered = new Set<string>();
+    for (const arm of arms) {
       const labelLower = this.normalised.slice(arm.labelStart, arm.labelStart + arm.labelLen).trim();
-      if (!ctx.knownStates.has(labelLower)) continue;   // others / multi-label → Phase 3
-      const fromState = ctx.stateOrig.get(labelLower)!;
-      this.parseStatements(arm.bodyStart, arm.bodyEnd, [], fromState, ctx);
+      if (labelLower === 'others') continue;
+      for (const part of labelLower.split('|')) {
+        const p = part.trim();
+        if (ctx.knownStates.has(p)) covered.add(p);
+      }
+    }
+
+    for (const arm of arms) {
+      const labelLower = this.normalised.slice(arm.labelStart, arm.labelStart + arm.labelLen).trim();
+      if (labelLower === 'others') {
+        for (const stateLower of ctx.knownStates) {
+          if (covered.has(stateLower)) continue;
+          this.parseStatements(arm.bodyStart, arm.bodyEnd, [], ctx.stateOrig.get(stateLower)!, ctx);
+        }
+        continue;
+      }
+      for (const part of labelLower.split('|')) {
+        const p = part.trim();
+        if (!ctx.knownStates.has(p)) continue;
+        this.parseStatements(arm.bodyStart, arm.bodyEnd, [], ctx.stateOrig.get(p)!, ctx);
+      }
     }
   }
 
@@ -252,7 +285,7 @@ export class VhdlFsmParser {
     const re = new RegExp(
       `\\bif\\b\\s+([\\s\\S]*?)\\s+\\bthen\\b` +
       `|\\bcase\\b\\s+([\\s\\S]*?)\\s+\\bis\\b` +
-      `|\\b(?:${sigAlt})\\s*<=\\s*(\\w+)\\s*;`,
+      `|\\b(?:${sigAlt})\\s*(?:<=|:=)\\s*(\\w+)\\s*;`,
       'g',
     );
     re.lastIndex = start;

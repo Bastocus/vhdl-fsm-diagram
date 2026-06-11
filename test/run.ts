@@ -24,11 +24,9 @@ import { VhdlFsmParser, FsmTransition } from '../src/parser';
 // Phase 1 (recursive parser) landed: nested_if, if_elsif_else, nested_case and
 // nested_if_in_case now pass and have been removed from this list.
 // Phase 2 (two-process FSMs / group signals by enum type) landed: two_process passes.
-const KNOWN_FAILS = new Set<string>([
-  'when_others',        // Phase 3: expand `when others` to uncovered states
-  'when_multi_label',   // Phase 3: expand `when a | b` to per-label transitions
-  'variable_assign',    // Phase 3: recognise `:=` assignments
-]);
+// Phase 3 (when others / multi-label / :=) landed: when_others, when_multi_label
+// and variable_assign now pass and have been removed from this list.
+const KNOWN_FAILS = new Set<string>([]);
 
 interface Expected { from: string; to: string; cond: string | null; }
 
