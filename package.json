@@ -1,0 +1,99 @@
+{
+  "name": "vhdl-fsm-visualizer",
+  "displayName": "VHDL FSM Visualizer",
+  "description": "Detects finite state machines in VHDL files and renders an interactive diagram with transitions",
+  "version": "0.5.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Bastocus/vhdl-fsm-visualizer.git"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Visualization",
+    "Other"
+  ],
+  "keywords": [
+    "vhdl",
+    "fsm",
+    "state machine",
+    "visualization",
+    "diagram"
+  ],
+  "activationEvents": [
+    "onLanguage:vhdl",
+    "onCommand:vhdl-fsm-visualizer.showDiagram"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "vhdl-fsm-visualizer.showDiagram",
+        "title": "VHDL: Show FSM Diagram",
+        "icon": "$(type-hierarchy)"
+      }
+    ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "vhdl-fsm-visualizer.showDiagram",
+          "when": "resourceLangId == vhdl",
+          "group": "navigation"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "vhdl-fsm-visualizer.showDiagram",
+          "when": "resourceLangId == vhdl",
+          "group": "navigation"
+        }
+      ]
+    },
+    "languages": [
+      {
+        "id": "vhdl",
+        "aliases": [
+          "VHDL",
+          "vhdl"
+        ],
+        "extensions": [
+          ".vhd",
+          ".vhdl"
+        ]
+      }
+    ],
+    "configuration": {
+      "title": "VHDL FSM Visualizer",
+      "properties": {
+        "vhdl-fsm-visualizer.autoRefresh": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically refresh the diagram when the file is saved"
+        },
+        "vhdl-fsm-visualizer.theme": {
+          "type": "string",
+          "enum": [
+            "dark",
+            "light",
+            "auto"
+          ],
+          "default": "auto",
+          "description": "Color theme for the FSM diagram"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "test": "tsx test/run.ts"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.85.0",
+    "@types/node": "^20.0.0",
+    "typescript": "^5.3.0",
+    "tsx": "^4.7.0"
+  }
+}
