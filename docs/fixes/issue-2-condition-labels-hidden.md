@@ -116,17 +116,17 @@ This fixture won't have automated assertions (labels are visual), but can be man
 
 ## Implementation Phases
 
-### Phase A: Label on edge (1-2 hours)
+### Phase A: Label on edge
 - Modify label position calculation in `render()`
 - Reuse existing edge path midpoint logic
 - **No** collision detection yet—just repositioning
 
-### Phase B: Avoid state circles (2-3 hours)
+### Phase B: Avoid state circles
 - Implement `isLabelColliding()` helper
 - Add perpendicular offset logic
 - Test with `dense_layout.vhd` fixture
 
-### Phase C: Multi-edge spacing (optional, 2-3 hours if attempted)
+### Phase C: Multi-edge spacing (optional)
 - Group nearby labels
 - Nudge labels in opposite directions
 - Risk: may introduce new edge cases; defer unless Phase A+B insufficient
