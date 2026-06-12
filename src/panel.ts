@@ -250,9 +250,9 @@ let selected=null, didFit=false;
 let focusMode=0;
 // Transitions table row hover — directed edge to highlight, or null.
 let tableHoverEdge=null;
-// A directed edge "..." pill was clicked — filters the transitions table to
-// just that edge and highlights it (mutually exclusive with 'selected').
-let clickedEdge=null;
+// A directed edge's pill/arrow was clicked — filters the transitions table
+// to just that edge WITHOUT dimming the graph (mutually exclusive with 'selected').
+let tableFilterEdge=null;
 let transitionsCollapsed=true;
 let transitionsHeight=260;
 // Geometry + DOM refs for the currently-drawn edges, kept around so table
@@ -277,12 +277,12 @@ function edgeMatches(edge,target){
 }
 
 // Transitions visible in the table for the current selection state:
-//   - a clicked edge filters to just that directed from/to pair
+//   - a clicked edge (pill/arrow) filters to just that directed from/to pair
 //   - a selected state filters to whatever isEdgeHL keeps highlighted
 //     (taking focusMode's outgoing/incoming/both into account)
 //   - otherwise, everything
 function getVisibleTransitions(fsm){
-  if(clickedEdge) return fsm.transitions.filter(tr=>tr.from===clickedEdge.from&&tr.to===clickedEdge.to);
+  if(tableFilterEdge) return fsm.transitions.filter(tr=>tr.from===tableFilterEdge.from&&tr.to===tableFilterEdge.to);
   if(selected)    return fsm.transitions.filter(tr=>isEdgeHL(tr));
   return fsm.transitions;
 }
@@ -290,13 +290,14 @@ function getVisibleTransitions(fsm){
 // Re-style edges/labels in place to reflect 'selected'/'tableHoverEdge'
 // without rebuilding the DOM (a full render() would detach the table row
 // under the mouse and break mouseenter/mouseleave tracking).
+// Note: tableFilterEdge doesn't cause dimming, only table filtering.
 function applyEdgeHighlight(){
   edgeGeomsRef.forEach(geo=>{
     const {edge,isSelf,pathEl,lbgEl,ltxtEl}=geo;
     if(!pathEl) return;
 
-    const isHL =(selected&&isEdgeHL(edge))||edgeMatches(edge,tableHoverEdge)||edgeMatches(edge,clickedEdge);
-    const isDim=(selected||tableHoverEdge||clickedEdge)&&!isHL;
+    const isHL =(selected&&isEdgeHL(edge))||edgeMatches(edge,tableHoverEdge);
+    const isDim=(selected||tableHoverEdge)&&!isHL;
 
     const stroke=isDim?C.edgeDim:isSelf?C.accent2:isHL?C.accent:C.edgeColor;
     const aId  =isDim?'a-d':isSelf?'a-s':isHL?'a-h':'a-n';
@@ -324,7 +325,7 @@ function buildTabs(){
     const t=document.createElement('div');
     t.className='tab'+(i===currentFsm?' active':'');
     t.textContent=fsm.signalName+' : '+fsm.typeName;
-    t.onclick=()=>{currentFsm=i;selected=null;tableHoverEdge=null;clickedEdge=null;didFit=false;buildTabs();render();};
+    t.onclick=()=>{currentFsm=i;selected=null;tableHoverEdge=null;tableFilterEdge=null;didFit=false;buildTabs();render();};
     bar.appendChild(t);
   });
 }
@@ -573,8 +574,8 @@ function render(){
   edgeGeoms.forEach(geo=>{
     const {edge,isSelf,pathD,lx,ly}=geo;
 
-    const isHL =(selected&&isEdgeHL(edge))||edgeMatches(edge,tableHoverEdge)||edgeMatches(edge,clickedEdge);
-    const isDim=(selected||tableHoverEdge||clickedEdge)&&!isHL;
+    const isHL =(selected&&isEdgeHL(edge))||edgeMatches(edge,tableHoverEdge);
+    const isDim=(selected||tableHoverEdge)&&!isHL;
 
     const stroke=isDim?C.edgeDim:isSelf?C.accent2:isHL?C.accent:C.edgeColor;
     const aId  =isDim?'a-d':isSelf?'a-s':isHL?'a-h':'a-n';
@@ -586,11 +587,30 @@ function render(){
       'marker-end':'url(#'+aId+')','stroke-linecap':'round',
       opacity:op,
     });
+    // Click on arrow/pill → toggle filter + tooltip
+    const isFilteredEdge=tableFilterEdge&&edge.from===tableFilterEdge.from&&edge.to===tableFilterEdge.to;
+    const toggleEdgeFilter=(ev)=>{
+      ev.stopPropagation();
+      selected=null; focusMode=0;
+      hideTooltip();
+      if(isFilteredEdge){
+        // Already filtered to this edge → clear the filter
+        tableFilterEdge=null;
+      } else {
+        // Filter to this edge
+        tableFilterEdge={from:edge.from,to:edge.to};
+        showEdgeTooltip(ev.clientX, ev.clientY, edge);
+      }
+      render();
+    };
+
     eGrp.appendChild(pathEl);
+    pathEl.style.cursor='pointer';
+    pathEl.addEventListener('click',toggleEdgeFilter);
     geo.pathEl=pathEl;
 
     // ── Label: always shows "..." ──────────────────────────────────────
-    // Clicking it reveals the condition(s) in a tooltip.
+    // Clicking it reveals the condition(s) in a tooltip and filters the table.
     const labelStroke=isDim?C.edgeDim:isSelf?C.accent2:isHL?C.labelHlBorder:C.labelBorder;
     const labelFill  =isDim?C.textMuted:isSelf?C.accent2:isHL?C.labelTextHl:C.labelText;
 
@@ -609,17 +629,8 @@ function render(){
     });
     ltxt.textContent='...';
 
-    // Click → show tooltip with all conditions for this directed edge,
-    // highlight it, and filter the transitions table to just this edge.
-    const tooltipForEdge=(ev)=>{
-      ev.stopPropagation();
-      selected=null; focusMode=0;
-      clickedEdge={from:edge.from,to:edge.to};
-      render();
-      showEdgeTooltip(ev.clientX, ev.clientY, edge);
-    };
-    lbg.addEventListener('click',tooltipForEdge);
-    ltxt.addEventListener('click',tooltipForEdge);
+    lbg.addEventListener('click',toggleEdgeFilter);
+    ltxt.addEventListener('click',toggleEdgeFilter);
 
     eGrp.appendChild(lbg);
     eGrp.appendChild(ltxt);
@@ -691,7 +702,7 @@ function render(){
 
     sg.addEventListener('click',e=>{
       e.stopPropagation(); hideTooltip();
-      clickedEdge=null;
+      tableFilterEdge=null;
       if(selected===state.name){
         focusMode++;
         if(focusMode>2){ selected=null; focusMode=0; }
@@ -894,7 +905,7 @@ function attachEvents(wrap){
   },{passive:false});
   wrap.addEventListener('click',e=>{
     if(!e.target.closest('[data-state]')&&!e.target.closest('[cursor="pointer"]')){
-      selected=null; clickedEdge=null; render();
+      selected=null; tableFilterEdge=null; render();
     }
   });
 }
