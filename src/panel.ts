@@ -18,7 +18,7 @@ export class FsmPanel {
       return;
     }
     const panel = vscode.window.createWebviewPanel(
-      FsmPanel.viewType, 'FSM Diagram', col,
+      FsmPanel.viewType, 'FSM Diagram', { viewColumn: col, preserveFocus },
       { enableScripts: true, retainContextWhenHidden: true, localResourceRoots: [extensionUri] }
     );
     FsmPanel.currentPanel = new FsmPanel(panel, extensionUri);
