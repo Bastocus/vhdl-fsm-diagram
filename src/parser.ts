@@ -50,7 +50,7 @@ export interface FsmSignal     { name: string; names: string[]; typeName: string
 
 export interface ParsedFsm {
   signalName: string;
-  signalLine: number;
+  caseLine: number;
   typeName: string;
   typeLine: number;
   states: FsmState[];
@@ -67,6 +67,7 @@ interface FsmCtx {
   knownStates: Set<string>;          // lowercase enum state names
   stateOrig:   Map<string, string>;  // lowercase → original-case state name
   out:         FsmTransition[];
+  stateLines:  Map<string, number>;  // lowercase state name → line of its `when` arm (or `when others`)
 }
 
 /** One `when` arm of a case statement, located inside the normalised source. */
@@ -96,7 +97,7 @@ export class VhdlFsmParser {
       const fsmSignals       = this.extractFsmSignals(enumTypes);
 
       for (const sig of fsmSignals) {
-        const { transitions, selector } = this.extractTransitions(sig);
+        const { transitions, selector, caseLine, stateLines } = this.extractTransitions(sig);
         // An enum type that is never *assigned* a state (only read as a `case`
         // selector, e.g. an enum used purely to pick a branch) yields no transitions
         // and is not a state machine — skip it so it doesn't show as an empty FSM tab.
@@ -104,14 +105,14 @@ export class VhdlFsmParser {
 
         const states: FsmState[] = sig.states.map(s => ({
           name: s,
-          line: this.findStateLine(s),
+          line: stateLines.get(s.toLowerCase()) ?? this.findStateLine(s),
         }));
         // The case-selector signal names the FSM; fall back to the first signal of
         // the type when no `case` header matched (should not happen if it emitted).
         const signalName = selector ?? sig.name;
         result.fsms.push({
           signalName,
-          signalLine: sig.linesByName.get(signalName.toLowerCase()) ?? sig.line,
+          caseLine:   caseLine ?? 1,
           typeName:   sig.typeName,
           typeLine:   this.findTypeLine(sig.typeName),
           states,
@@ -213,27 +214,32 @@ export class VhdlFsmParser {
   // each arm body with an empty condition stack. Assignments to any group signal
   // count as transitions (so a two-process `next_state <= …` is captured).
   // Returns the original-case selector signal that headed the (first) matched case.
-  private extractTransitions(sig: FsmSignal): { transitions: FsmTransition[]; selector?: string } {
+  private extractTransitions(sig: FsmSignal): { transitions: FsmTransition[]; selector?: string; caseLine?: number; stateLines: Map<string, number> } {
     const ctx: FsmCtx = {
       assignSigs:  new Set(sig.names.map(s => s.toLowerCase())),
       knownStates: new Set(sig.states.map(s => s.toLowerCase())),
       stateOrig:   new Map(sig.states.map(s => [s.toLowerCase(), s])),
       out:         [],
+      stateLines:  new Map(),
     };
 
     const sigAlt = sig.names.map(s => escapeRegex(s.toLowerCase())).join('|');
     const headerRe = new RegExp(`\\bcase\\s+(${sigAlt})\\s+is\\b`, 'g');
     let selector: string | undefined;
+    let caseLine: number | undefined;
     let hm: RegExpExecArray | null;
     while ((hm = headerRe.exec(this.normalised)) !== null) {
       const selStart = hm.index + /^case\s+/.exec(hm[0])![0].length;
-      if (selector === undefined) selector = this.originalAt(selStart, hm[1].length);
+      if (selector === undefined) {
+        selector = this.originalAt(selStart, hm[1].length);
+        caseLine = this.offsetToLine(hm.index);
+      }
       const bodyStart = hm.index + hm[0].length;
       const bodyEnd   = this.findMatchingEndCase(bodyStart);
       if (bodyEnd < 0) continue;
       this.parseTopCase(bodyStart, bodyEnd, ctx);
     }
-    return { transitions: ctx.out, selector };
+    return { transitions: ctx.out, selector, caseLine, stateLines: ctx.stateLines };
   }
 
   /**
@@ -262,6 +268,7 @@ export class VhdlFsmParser {
       if (labelLower === 'others') {
         for (const stateLower of ctx.knownStates) {
           if (covered.has(stateLower)) continue;
+          if (!ctx.stateLines.has(stateLower)) ctx.stateLines.set(stateLower, this.offsetToLine(arm.labelStart));
           this.parseStatements(arm.bodyStart, arm.bodyEnd, [], ctx.stateOrig.get(stateLower)!, ctx);
         }
         continue;
@@ -269,6 +276,7 @@ export class VhdlFsmParser {
       for (const part of labelLower.split('|')) {
         const p = part.trim();
         if (!ctx.knownStates.has(p)) continue;
+        if (!ctx.stateLines.has(p)) ctx.stateLines.set(p, this.offsetToLine(arm.labelStart));
         this.parseStatements(arm.bodyStart, arm.bodyEnd, [], ctx.stateOrig.get(p)!, ctx);
       }
     }

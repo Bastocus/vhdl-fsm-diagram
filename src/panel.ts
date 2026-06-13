@@ -700,6 +700,7 @@ function render(){
 
     const sg=el('g',{cursor:'pointer',opacity:isDim?'0.22':'1'});
     sg.dataset.state=state.name;
+    sg.appendChild(el('title')).textContent='Ctrl+Click to go to source';
 
     if(isSel){
       sg.appendChild(el('circle',{cx:p.x,cy:p.y,r:R+14,fill:C.stateShadow,filter:'url(#glow)'}));
@@ -748,6 +749,7 @@ function render(){
 
     sg.addEventListener('click',e=>{
       e.stopPropagation(); hideTooltip();
+      if(e.ctrlKey||e.metaKey){ goToLine(state.line); return; }
       tableFilterEdge=null;
       if(selected===state.name){
         focusMode++;
@@ -853,10 +855,11 @@ function buildTransitionsPanel(fsm){
       const tdLine=document.createElement('td'); tdLine.className='tp-line';
       const lineLink=document.createElement('span');
       lineLink.className='tp-line-link';
+      lineLink.title='Ctrl+Click to go to source';
       lineLink.textContent=String(tr.line);
       lineLink.onclick=(ev)=>{
         ev.stopPropagation();
-        vscodeApi.postMessage({command:'goToLine',line:tr.line});
+        goToLineOnModClick(ev,tr.line);
       };
       tdLine.appendChild(lineLink);
       row.appendChild(tdFrom); row.appendChild(tdTo); row.appendChild(tdCond); row.appendChild(tdLine);
@@ -921,6 +924,13 @@ function goToLine(line){
   vscodeApi.postMessage({command:'goToLine',line});
 }
 
+// Navigate to a line only when Ctrl/Cmd is held; used by all "go to source" links.
+function goToLineOnModClick(ev,line){
+  if(!(ev.ctrlKey||ev.metaKey)) return;
+  ev.stopPropagation();
+  goToLine(line);
+}
+
 function infoHtml(fsm){
   const f=fsm||FSM_DATA[currentFsm];
   // Count unique directed edges (grouped)
@@ -930,8 +940,8 @@ function infoHtml(fsm){
     :grouped.length;
   const modeLabel=focusMode===1?', outgoing only':focusMode===2?', incoming only':'';
   return '<h4>'+(selected?'&#9711; '+selected+modeLabel:'FSM Info')+'</h4>'+
-    '<div class="info-row"><span>Signal</span><span class="v info-link" onclick="goToLine('+f.signalLine+')">'+f.signalName+'</span></div>'+
-    '<div class="info-row"><span>Type</span><span class="v info-link" onclick="goToLine('+f.typeLine+')">'+f.typeName+'</span></div>'+
+    '<div class="info-row"><span>Signal</span><span class="v info-link" title="Ctrl+Click to go to source" onclick="goToLineOnModClick(event,'+f.caseLine+')">'+f.signalName+'</span></div>'+
+    '<div class="info-row"><span>Type</span><span class="v info-link" title="Ctrl+Click to go to source" onclick="goToLineOnModClick(event,'+f.typeLine+')">'+f.typeName+'</span></div>'+
     '<div class="info-row"><span>States</span><span class="v">'+f.states.length+'</span></div>'+
     '<div class="info-row"><span>Arrows</span><span class="v">'+cnt+'</span></div>'+
     (selected?'<div class="info-note">Click again to cycle focus, click elsewhere to deselect</div>':'');
