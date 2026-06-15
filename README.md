@@ -57,7 +57,7 @@ The parser handles common real-world VHDL idioms, including:
 ## Issues & feedback
 
 Found a VHDL construct that isn't detected correctly, or have a feature request?
-Please [open an issue on GitHub](https://github.com/Bastocus/vhdl-fsm-visualizer/issues).
+Please [open an issue on GitHub](https://github.com/Bastocus/vhdl-fsm-diagram/issues).
 
 ## License
 

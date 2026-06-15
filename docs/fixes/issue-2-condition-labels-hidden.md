@@ -1,6 +1,6 @@
 # Fix: 3-dot condition labels hidden under state circles
 
-**GitHub Issue:** [#2](https://github.com/Bastocus/vhdl-fsm-visualizer/issues/2)
+**GitHub Issue:** [#2](https://github.com/Bastocus/vhdl-fsm-diagram/issues/2)
 
 **Status:** Not started
 
