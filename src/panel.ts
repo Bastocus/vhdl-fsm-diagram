@@ -299,6 +299,9 @@ let transitionsHeight=260;
 let edgeGeomsRef=[];
 // Detect click vs drag on empty space: record mousedown, check distance on mouseup
 let emptyClickStart=null;
+// Set while panning actually moves the view; suppresses the document-level
+// click handler that would otherwise hide the tooltip after a drag-release.
+let dragOccurred=false;
 
 // Is this specific edge highlighted under the current focusMode? Unlike
 // isKeptNeighbor (which can keep a *state* visible via a different edge),
@@ -926,7 +929,10 @@ function hideTooltip(){
   document.getElementById('tt').style.display='none';
 }
 
-document.addEventListener('click', ()=>hideTooltip());
+document.addEventListener('click', ()=>{
+  if(dragOccurred){ dragOccurred=false; return; }
+  hideTooltip();
+});
 document.addEventListener('keydown', e=>{ if(e.key==='Escape') hideTooltip(); });
 
 function goToLine(line){
@@ -961,11 +967,12 @@ function attachEvents(wrap){
   wrap.addEventListener('mousedown',e=>{
     if(e.target.closest('[data-state]')||e.target.closest('#info-panel')) return;
     panning=true; px0=e.clientX-panX; py0=e.clientY-panY;
+    dragOccurred=false;
     wrap.classList.add('grabbing');
   });
   window.addEventListener('mousemove',e=>{
     if(!panning) return;
-    hideTooltip();
+    dragOccurred=true;
     panX=e.clientX-px0; panY=e.clientY-py0; applyT();
   });
   window.addEventListener('mouseup',()=>{
