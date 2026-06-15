@@ -17,6 +17,8 @@ interactive, clickable diagram — right inside VS Code.
 - **Transitions table** — a sortable table of every `From / To / Condition / Line` entry,
   synced with the diagram. Clicking a row highlights the corresponding arrow, and vice versa.
 - **Jump to source** — click a transition to jump straight to the line of VHDL that produces it.
+- **Export as SVG** — save the diagram as a standalone SVG file for documentation or
+  presentations.
 - **Auto-refresh on save** — the diagram updates automatically when you save the file
   (configurable).
 - **Light / dark / auto theme** — matches your VS Code color theme by default.
