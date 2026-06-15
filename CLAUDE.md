@@ -79,12 +79,12 @@ When ready to release a new version:
 3. **Upload the VSIX** to the GitHub release as an asset using the API:
    ```bash
    # Get the GitHub token from ~/.claude/settings.json (GITHUB_TOKEN field)
-   # POST to https://uploads.github.com/repos/Bastocus/vhdl-fsm-visualizer/releases/{release_id}/assets
+   # POST to https://uploads.github.com/repos/Bastocus/vhdl-fsm-diagram/releases/{release_id}/assets
    # Use --data-binary (NOT -d @filename) for binary uploads
    curl -X POST -H "Authorization: token $TOKEN" \
      -H "Content-Type: application/octet-stream" \
      --data-binary "@vhdl-fsm-diagram-X.Y.Z.vsix" \
-     "https://uploads.github.com/repos/Bastocus/vhdl-fsm-visualizer/releases/{release_id}/assets?name=vhdl-fsm-diagram-X.Y.Z.vsix"
+     "https://uploads.github.com/repos/Bastocus/vhdl-fsm-diagram/releases/{release_id}/assets?name=vhdl-fsm-diagram-X.Y.Z.vsix"
    ```
 4. **Verify the upload** by downloading and comparing SHA256:
    - Calculate local SHA256: `sha256sum vhdl-fsm-diagram-X.Y.Z.vsix`
