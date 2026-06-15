@@ -336,7 +336,7 @@ function applyEdgeHighlight(){
     const {edge,isSelf,pathEl,lbgEl,ltxtEl}=geo;
     if(!pathEl) return;
 
-    const isHL =(selected&&isEdgeHL(edge))||edgeMatches(edge,tableHoverEdge);
+    const isHL =(selected&&isEdgeHL(edge))||edgeMatches(edge,tableHoverEdge)||edgeMatches(edge,tableFilterEdge);
     const isDim=(selected||tableHoverEdge)&&!isHL;
 
     const stroke=isDim?C.edgeDim:isSelf?C.accent2:isHL?C.accent:C.edgeColor;
@@ -614,7 +614,7 @@ function render(){
   edgeGeoms.forEach(geo=>{
     const {edge,isSelf,pathD,lx,ly}=geo;
 
-    const isHL =(selected&&isEdgeHL(edge))||edgeMatches(edge,tableHoverEdge);
+    const isHL =(selected&&isEdgeHL(edge))||edgeMatches(edge,tableHoverEdge)||edgeMatches(edge,tableFilterEdge);
     const isDim=(selected||tableHoverEdge)&&!isHL;
 
     const stroke=isDim?C.edgeDim:isSelf?C.accent2:isHL?C.accent:C.edgeColor;
