@@ -311,6 +311,8 @@ let tableHoverEdge=null;
 // A directed edge's pill/arrow was clicked — filters the transitions table
 // to just that edge WITHOUT dimming the graph (mutually exclusive with 'selected').
 let tableFilterEdge=null;
+// Pill hover-tooltip state: shared across all pills (only one hovered at a time).
+let pillHoverTimer=null, pillHoverShowing=false, pillHoverX=0, pillHoverY=0;
 let transitionsCollapsed=true;
 let transitionsHeight=260;
 // Geometry + DOM refs for the currently-drawn edges, kept around so table
@@ -490,6 +492,7 @@ function render(){
   const main   =document.getElementById('main-content');
   const toolbar=document.getElementById('toolbar');
   hideTooltip();
+  clearTimeout(pillHoverTimer); pillHoverTimer=null; pillHoverShowing=false;
 
   const prevTpBody=document.getElementById('tp-body');
   const prevTpScroll=prevTpBody?prevTpBody.scrollTop:0;
@@ -705,15 +708,34 @@ function render(){
 
     lbg.addEventListener('click',toggleEdgeFilter(true));
     ltxt.addEventListener('click',toggleEdgeFilter(true));
+    // Store title text for SVG export (injected as <title> in the clone, not live DOM)
+    lbg.setAttribute('data-pill-title',edge.from+' → '+edge.to+': '+edge.conditions.join(', '));
 
-    // Add title to rect for native SVG tooltips
-    const ttl=el('title');
-    const titleText=edge.from+' -> '+edge.to+': '+edge.conditions.join(', ');
-    ttl.textContent=titleText;
-    lbg.insertBefore(ttl,lbg.firstChild);
-
-    eGrp.appendChild(lbg);
-    eGrp.appendChild(ltxt);
+    // ── Pill hover: show tooltip after 0.5s of stillness ──────────────
+    const pillGrp=el('g');
+    pillGrp.appendChild(lbg);
+    pillGrp.appendChild(ltxt);
+    pillGrp.addEventListener('mouseenter',e=>{
+      pillHoverX=e.clientX; pillHoverY=e.clientY;
+      pillHoverTimer=setTimeout(()=>{
+        pillHoverShowing=true;
+        showEdgeTooltip(pillHoverX,pillHoverY,edge);
+      },500);
+    });
+    pillGrp.addEventListener('mousemove',e=>{
+      pillHoverX=e.clientX; pillHoverY=e.clientY;
+      if(pillHoverShowing){ hideTooltip(); pillHoverShowing=false; }
+      clearTimeout(pillHoverTimer);
+      pillHoverTimer=setTimeout(()=>{
+        pillHoverShowing=true;
+        showEdgeTooltip(pillHoverX,pillHoverY,edge);
+      },500);
+    });
+    pillGrp.addEventListener('mouseleave',()=>{
+      clearTimeout(pillHoverTimer); pillHoverTimer=null;
+      if(pillHoverShowing){ hideTooltip(); pillHoverShowing=false; }
+    });
+    eGrp.appendChild(pillGrp);
     geo.lbgEl=lbg;
     geo.ltxtEl=ltxt;
   });
@@ -1074,6 +1096,14 @@ function exportSvg(){
   if(bgRect) {
     bgRect.remove();
   }
+
+  // Inject <title> elements into pill rects for native SVG tooltips in exported file
+  clone.querySelectorAll('[data-pill-title]').forEach(rect=>{
+    const t=document.createElementNS('http://www.w3.org/2000/svg','title');
+    t.textContent=rect.getAttribute('data-pill-title');
+    rect.removeAttribute('data-pill-title');
+    rect.insertBefore(t,rect.firstChild);
+  });
 
   // Temporarily add to DOM to calculate bounding box
   clone.style.position='absolute';
