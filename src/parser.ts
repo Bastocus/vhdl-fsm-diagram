@@ -1,5 +1,5 @@
 /**
- * VHDL FSM Parser  v0.9  (various-fixes Phase 4 — case choice ranges `a to b`)
+ * VHDL FSM Parser  v1.6  (various-fixes Phase 5 — selected signal assignment `with … select`)
  *
  * Changes vs v0.8:
  *  - New `expandRangePart(part, ctx)` helper: when a `when` arm label part matches
@@ -285,7 +285,117 @@ export class VhdlFsmParser {
         caseLine = thisCaseLine;
       }
     }
+    // Phase 5: scan for `with <sel> select <target> <= … ;` anywhere in the source.
+    const selInfo = this.parseSelectedAssign(sig, ctx);
+    if (selector === undefined && selInfo.selector !== undefined) selector = selInfo.selector;
+    if (caseLine === undefined && selInfo.caseLine !== undefined) caseLine = selInfo.caseLine;
+
     return { transitions: ctx.out, selector, caseLine: caseLine ?? fallbackCaseLine, stateLines: ctx.stateLines };
+  }
+
+  /**
+   * Scan the whole source for `with <sel> select <target> <= <selected_waveforms> ;`
+   * where both `sel` and `target` are signals of the same FSM group.
+   * Each `val when choices` clause maps choices (from-states) → val (to-state).
+   * `when others` expands to every state not named by a sibling explicit choice.
+   * Returns the selector signal name and statement line (for FSM metadata), if found.
+   */
+  private parseSelectedAssign(
+    sig: FsmSignal,
+    ctx: FsmCtx,
+  ): { selector?: string; caseLine?: number } {
+    const sigAlt = sig.names.map(s => escapeRegex(s.toLowerCase())).join('|');
+    const re = new RegExp(
+      `\\bwith\\s+(${sigAlt})\\s+select\\s+(${sigAlt})\\s*<=`,
+      'g',
+    );
+    let result: { selector?: string; caseLine?: number } = {};
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(this.normalised)) !== null) {
+      const stmtOffset = m.index;
+      const selLower   = m[1];
+      const afterLe    = m.index + m[0].length;
+
+      // Find the terminating semicolon at paren depth 0.
+      let depth = 0;
+      let semiPos = -1;
+      for (let i = afterLe; i < this.normalised.length; i++) {
+        const c = this.normalised[i];
+        if (c === '(') depth++;
+        else if (c === ')') depth--;
+        else if (c === ';' && depth === 0) { semiPos = i; break; }
+      }
+      if (semiPos < 0) continue;
+
+      // Split the body into comma-separated clauses at paren depth 0.
+      const clauseTexts: string[] = [];
+      let cur = '';
+      let d = 0;
+      for (let i = afterLe; i < semiPos; i++) {
+        const c = this.normalised[i];
+        if (c === '(') { d++; cur += c; }
+        else if (c === ')') { d--; cur += c; }
+        else if (c === ',' && d === 0) { clauseTexts.push(cur); cur = ''; }
+        else cur += c;
+      }
+      if (cur.trim()) clauseTexts.push(cur);
+
+      // Parse each clause into { val, choices }.
+      interface Clause { val: string; choices: string; }
+      const clauses: Clause[] = [];
+      const covered = new Set<string>();
+
+      for (const text of clauseTexts) {
+        const wi = text.search(/\bwhen\b/);
+        if (wi < 0) continue;
+        const val     = text.slice(0, wi).trim();
+        const choices = text.slice(wi + 4).trim();
+        clauses.push({ val, choices });
+        if (choices !== 'others') {
+          for (const part of choices.split('|')) {
+            const p = part.trim();
+            const range = this.expandRangePart(p, ctx);
+            if (range.length > 0) range.forEach(s => covered.add(s));
+            else if (ctx.knownStates.has(p)) covered.add(p);
+          }
+        }
+      }
+
+      // Emit transitions.
+      for (const { val, choices } of clauses) {
+        const toLower = this.unwrapStateRhs(val);
+        if (toLower === null || !ctx.knownStates.has(toLower)) continue;
+        const toState = ctx.stateOrig.get(toLower)!;
+
+        let fromStates: string[];
+        if (choices === 'others') {
+          fromStates = [...ctx.knownStates].filter(s => !covered.has(s));
+        } else {
+          fromStates = [];
+          for (const part of choices.split('|')) {
+            const p = part.trim();
+            const range = this.expandRangePart(p, ctx);
+            if (range.length > 0) fromStates.push(...range);
+            else if (ctx.knownStates.has(p)) fromStates.push(p);
+          }
+        }
+        for (const fromLower of fromStates) {
+          this.emit(ctx.stateOrig.get(fromLower)!, toState, [], stmtOffset, ctx);
+        }
+      }
+
+      // Record selector/caseLine for the first matched statement.
+      if (result.selector === undefined) {
+        result = {
+          selector: this.originalAt(
+            m.index + /^\bwith\s+/.exec(m[0])![0].length,
+            selLower.length,
+          ),
+          caseLine: this.offsetToLine(stmtOffset),
+        };
+      }
+    }
+    return result;
   }
 
   /**
