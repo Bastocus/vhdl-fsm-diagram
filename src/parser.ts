@@ -1,5 +1,14 @@
 /**
- * VHDL FSM Parser  v0.5  (Phase 3 — `when others` / multi-label / `:=`)
+ * VHDL FSM Parser  v0.6  (various-fixes Phase 1 — disambiguate `when` in arm splitting)
+ *
+ * Changes vs v0.5:
+ *  - `splitCaseArms` no longer treats every `\bwhen\b … =>` as an arm boundary. A
+ *    `when` only starts a new arm if the nearest preceding significant token is `is`
+ *    (a `case … is` header) or `;` (end of the previous statement) — see
+ *    `isArmStartWhen`. This stops a conditional/selected assignment (`x <= a when c
+ *    else b;`) or a loop's `exit`/`next … when cond;` from being mistaken for an arm
+ *    label, which previously let the non-greedy `=>` search swallow forward into the
+ *    next real arm and silently drop it.
  *
  * Changes vs v0.4 (Phase 3, Part C):
  *  - Top-level `when others =>` arms expand to one transition set per *uncovered*
@@ -468,6 +477,14 @@ export class VhdlFsmParser {
       const t = m[0];
       if (/^end/.test(t))                       { depth--; continue; }
       if (/^case\b/.test(t) || /^if\b/.test(t)) { depth++; continue; }
+      if (!this.isArmStartWhen(m.index)) {
+        // Not a real arm-opening `when` — a conditional/selected assignment or an
+        // `exit`/`next … when` guard. The non-greedy `=>` search may have swallowed
+        // past a real arm's `when … =>`, so resume right after this `when` instead
+        // of after the whole (bogus) match.
+        re.lastIndex = m.index + 4; // "when".length
+        continue;
+      }
       if (depth !== 0) continue;                // `when` of a nested case
 
       const labelStart = m.index + /^when\s+/.exec(t)![0].length;
@@ -476,6 +493,20 @@ export class VhdlFsmParser {
     }
     if (arms.length) arms[arms.length - 1].bodyEnd = end;
     return arms;
+  }
+
+  /**
+   * True when the `when` at `idx` begins a statement — i.e. the nearest preceding
+   * significant token is `is` (a `case … is` header) or `;` (end of the previous
+   * statement). A `when` preceded by an operand/identifier (conditional/selected
+   * assignment) or by `exit`/`next` fails this test and is not an arm boundary.
+   */
+  private isArmStartWhen(idx: number): boolean {
+    let i = idx;
+    while (i > 0 && /\s/.test(this.normalised[i - 1])) i--;
+    if (i === 0) return true;
+    if (this.normalised[i - 1] === ';') return true;
+    return /\bis$/.test(this.normalised.slice(Math.max(0, i - 6), i));
   }
 
   // ── Block-matching helpers ────────────────────────────────────────────────
