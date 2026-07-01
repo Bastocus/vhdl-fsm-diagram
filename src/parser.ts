@@ -1,5 +1,15 @@
 /**
- * VHDL FSM Parser  v0.7  (various-fixes Phase 2 — conditional signal assignment)
+ * VHDL FSM Parser  v0.8  (various-fixes Phase 3 — robust RHS: qualified/paren)
+ *
+ * Changes vs v0.7:
+ *  - New `unwrapStateRhs(raw)` helper strips `type'(state)` qualified forms and
+ *    bare-paren `(state)` wrappers so both `next_state <= state_t'(running);` and
+ *    `next_state <= (done);` now emit transitions.
+ *  - The assignment regex in `parseStatements` now captures qualified/paren forms in
+ *    addition to bare words, and both the plain assignment path and the
+ *    `parseConditionalAssign` path route through `unwrapStateRhs`.
+ *
+ * Changes vs v0.7  (various-fixes Phase 2 — conditional signal assignment)
  *
  * Changes vs v0.6:
  *  - `parseStatements` recognises `x <= a when c else b when c2 else d;` (LRM
@@ -330,7 +340,7 @@ export class VhdlFsmParser {
     const re = new RegExp(
       `\\bif\\b\\s+([\\s\\S]*?)\\s+\\bthen\\b` +
       `|\\bcase\\b\\s+([\\s\\S]*?)\\s+\\bis\\b` +
-      `|\\b(?:${sigAlt})\\s*(?:<=|:=)\\s*(\\w+)\\b`,
+      `|\\b(?:${sigAlt})\\s*(?:<=|:=)\\s*(\\w+'\\(\\w+\\)|\\(\\w+\\)|\\w+)`,
       'g',
     );
     re.lastIndex = start;
@@ -354,20 +364,19 @@ export class VhdlFsmParser {
         this.parseCase(selStart, m[2].length, headEnd, stop, conds, fromState, ctx);
         re.lastIndex = this.tokenEnd(stop, /\bend\s+case\b/);
       } else {
-        // ── assignment: bare word, or the start of a `when … else` chain ──
-        const targetLower = m[3].toLowerCase();
+        // ── assignment: bare word, qualified, paren-wrapped, or `when … else` chain ──
+        const rhsRaw      = m[3];
+        const targetLower = this.unwrapStateRhs(rhsRaw);
         const afterWord   = m.index + m[0].length;
         const next        = this.skipWs(afterWord);
         if (this.matchesAt(/when\b/, next)) {
-          re.lastIndex = this.parseConditionalAssign(m[3], fromState, conds, ctx, m.index, next);
+          re.lastIndex = this.parseConditionalAssign(rhsRaw, fromState, conds, ctx, m.index, next);
         } else if (this.normalised[next] === ';') {
-          if (ctx.knownStates.has(targetLower)) {
+          if (targetLower !== null && ctx.knownStates.has(targetLower)) {
             this.emit(fromState, ctx.stateOrig.get(targetLower)!, conds, m.index, ctx);
           }
           re.lastIndex = next + 1;
         }
-        // else: RHS is neither a bare word nor a when-chain (e.g. qualified/paren
-        // wrapped — Phase 3); leave re.lastIndex at the default and keep scanning.
       }
     }
   }
@@ -384,6 +393,24 @@ export class VhdlFsmParser {
     const sticky = new RegExp(re.source, 'y');
     sticky.lastIndex = idx;
     return sticky.test(this.normalised);
+  }
+
+  /**
+   * Strip a qualified (`type'(state)`) or parenthesized (`(state)`) wrapper from
+   * an assignment RHS captured by the regex, and return the lowercased inner
+   * identifier. Returns null if the string doesn't match any supported form.
+   */
+  private unwrapStateRhs(raw: string): string | null {
+    const s = raw.trim();
+    // type'(state) — qualified expression
+    const qual = /^\w+'\((\w+)\)$/.exec(s);
+    if (qual) return qual[1].toLowerCase();
+    // (state) — parenthesized
+    const paren = /^\((\w+)\)$/.exec(s);
+    if (paren) return paren[1].toLowerCase();
+    // bare identifier
+    if (/^\w+$/.test(s)) return s.toLowerCase();
+    return null;
   }
 
   /**
@@ -430,8 +457,8 @@ export class VhdlFsmParser {
       pos = elseTok.index + 4; // past "else"
 
       const guard = [...priorConds.map(c => this.negate(c)), condText];
-      const valLower = curVal.toLowerCase();
-      if (ctx.knownStates.has(valLower)) {
+      const valLower = this.unwrapStateRhs(curVal);
+      if (valLower !== null && ctx.knownStates.has(valLower)) {
         this.emit(fromState, ctx.stateOrig.get(valLower)!, conds.concat(guard), stmtStart, ctx);
       }
       priorConds.push(condText);
@@ -441,8 +468,8 @@ export class VhdlFsmParser {
       const valText = this.originalAt(pos, nextTok.index - pos).trim();
 
       if (nextTok.token === ';') {
-        const lastLower = valText.toLowerCase();
-        if (ctx.knownStates.has(lastLower)) {
+        const lastLower = this.unwrapStateRhs(valText);
+        if (lastLower !== null && ctx.knownStates.has(lastLower)) {
           const elseGuard = priorConds.map(c => this.negate(c));
           this.emit(fromState, ctx.stateOrig.get(lastLower)!, conds.concat(elseGuard), stmtStart, ctx);
         }
