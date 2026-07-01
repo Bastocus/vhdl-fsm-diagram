@@ -28,6 +28,8 @@ import { VhdlFsmParser, FsmTransition } from '../src/parser';
 // and variable_assign now pass and have been removed from this list.
 // various-fixes Phase 1 (disambiguate `when` in arm splitting) landed: exit_when
 // and cond_assign_neighbor now pass and have been removed from this list.
+// various-fixes Phase 2 (conditional signal assignment `when … else`) landed:
+// conditional_assign now passes and has been removed from this list.
 const KNOWN_FAILS = new Set<string>([]);
 
 interface Expected { from: string; to: string; cond: string | null; }

@@ -3,10 +3,11 @@
 -- "next_state <= waiting when go = '1' else done;" had no `=>` of its own, so the
 -- non-greedy scan matched forward to the `running` arm's own `=>` and merged the
 -- two arms, dropping the `waiting` and `done` arms below.
--- Emitting a transition for the conditional assignment itself is Phase 2's job —
--- here only the plain neighbour assignments are expected.
+-- Phase 2 now also emits transitions for the conditional assignment itself.
 --
 -- EXPECT idle -> running | (always)
+-- EXPECT running -> waiting | go = '1'
+-- EXPECT running -> done | not (go)
 -- EXPECT waiting -> done | (always)
 -- EXPECT done -> idle | (always)
 

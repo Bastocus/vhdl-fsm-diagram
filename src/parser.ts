@@ -1,7 +1,14 @@
 /**
- * VHDL FSM Parser  v0.6  (various-fixes Phase 1 — disambiguate `when` in arm splitting)
+ * VHDL FSM Parser  v0.7  (various-fixes Phase 2 — conditional signal assignment)
  *
- * Changes vs v0.5:
+ * Changes vs v0.6:
+ *  - `parseStatements` recognises `x <= a when c else b when c2 else d;` (LRM
+ *    `conditional_waveforms`), including the `:=` variable form, via
+ *    `parseConditionalAssign`. Each branch emits a transition guarded by the
+ *    negation of every earlier branch's condition, mirroring `parseIf`'s
+ *    elsif/else negation chain.
+ *
+ * Changes vs v0.5 (various-fixes Phase 1):
  *  - `splitCaseArms` no longer treats every `\bwhen\b … =>` as an arm boundary. A
  *    `when` only starts a new arm if the nearest preceding significant token is `is`
  *    (a `case … is` header) or `;` (end of the previous statement) — see
@@ -307,6 +314,8 @@ export class VhdlFsmParser {
    *   - `if … then … [elsif … then …] [else …] end if`
    *   - `case … is … when … => … end case`
    *   - `<sig> <= <state> ;` assignment
+   *   - `<sig> <= <state> when <cond> [else <state> when <cond>]… [else <state>] ;`
+   *     conditional assignment (`conditional_waveforms`)
    * Each `if`/`case` is consumed whole (up to its matching `end`), so the loop only
    * ever sees constructs at the current depth; nested ones are handled by recursion.
    */
@@ -321,7 +330,7 @@ export class VhdlFsmParser {
     const re = new RegExp(
       `\\bif\\b\\s+([\\s\\S]*?)\\s+\\bthen\\b` +
       `|\\bcase\\b\\s+([\\s\\S]*?)\\s+\\bis\\b` +
-      `|\\b(?:${sigAlt})\\s*(?:<=|:=)\\s*(\\w+)\\s*;`,
+      `|\\b(?:${sigAlt})\\s*(?:<=|:=)\\s*(\\w+)\\b`,
       'g',
     );
     re.lastIndex = start;
@@ -345,12 +354,103 @@ export class VhdlFsmParser {
         this.parseCase(selStart, m[2].length, headEnd, stop, conds, fromState, ctx);
         re.lastIndex = this.tokenEnd(stop, /\bend\s+case\b/);
       } else {
-        // ── assignment ──
+        // ── assignment: bare word, or the start of a `when … else` chain ──
         const targetLower = m[3].toLowerCase();
-        if (ctx.knownStates.has(targetLower)) {
-          this.emit(fromState, ctx.stateOrig.get(targetLower)!, conds, m.index, ctx);
+        const afterWord   = m.index + m[0].length;
+        const next        = this.skipWs(afterWord);
+        if (this.matchesAt(/when\b/, next)) {
+          re.lastIndex = this.parseConditionalAssign(m[3], fromState, conds, ctx, m.index, next);
+        } else if (this.normalised[next] === ';') {
+          if (ctx.knownStates.has(targetLower)) {
+            this.emit(fromState, ctx.stateOrig.get(targetLower)!, conds, m.index, ctx);
+          }
+          re.lastIndex = next + 1;
         }
+        // else: RHS is neither a bare word nor a when-chain (e.g. qualified/paren
+        // wrapped — Phase 3); leave re.lastIndex at the default and keep scanning.
       }
+    }
+  }
+
+  /** Index of the first non-whitespace character at or after `idx`. */
+  private skipWs(idx: number): number {
+    let i = idx;
+    while (i < this.normalised.length && /\s/.test(this.normalised[i])) i++;
+    return i;
+  }
+
+  /** True if `re` matches `this.normalised` starting exactly at `idx`. */
+  private matchesAt(re: RegExp, idx: number): boolean {
+    const sticky = new RegExp(re.source, 'y');
+    sticky.lastIndex = idx;
+    return sticky.test(this.normalised);
+  }
+
+  /**
+   * Parse a conditional signal/variable assignment's waveform chain, starting right
+   * after the first (bare-word) value, at the `when` keyword:
+   *   `<target> <= val0 when cond0 else val1 when cond1 else … valN ;`
+   * Emits one transition per branch, each guarded by the negation of every earlier
+   * branch's condition (mirroring `parseIf`'s elsif/else negation chain):
+   *   branch k: conds + [not(cond0) … not(cond_{k-1}), condK]
+   *   trailing valN (no `when`): conds + [not(cond0) … not(condLast)]
+   * Returns the offset just past the terminating `;`, for the caller to resume
+   * scanning from.
+   */
+  private parseConditionalAssign(
+    firstVal:    string,
+    fromState:   string,
+    conds:       string[],
+    ctx:         FsmCtx,
+    stmtStart:   number,
+    whenIdx:     number,
+  ): number {
+    const tokenRe = /\(|\)|\bwhen\b|\belse\b|;/g;
+    let depth = 0;
+    const nextTopLevel = (from: number): { token: string; index: number } | null => {
+      tokenRe.lastIndex = from;
+      let mm: RegExpExecArray | null;
+      while ((mm = tokenRe.exec(this.normalised)) !== null) {
+        if (mm[0] === '(') { depth++; continue; }
+        if (mm[0] === ')') { depth--; continue; }
+        if (depth !== 0) continue;
+        return { token: mm[0], index: mm.index };
+      }
+      return null;
+    };
+
+    const priorConds: string[] = [];
+    let curVal = firstVal;
+    let pos = whenIdx + 4; // past "when"
+
+    for (;;) {
+      const elseTok = nextTopLevel(pos);
+      if (!elseTok || elseTok.token !== 'else') return this.normalised.length; // malformed
+      const condText = this.fmtCond(this.originalAt(pos, elseTok.index - pos));
+      pos = elseTok.index + 4; // past "else"
+
+      const guard = [...priorConds.map(c => this.negate(c)), condText];
+      const valLower = curVal.toLowerCase();
+      if (ctx.knownStates.has(valLower)) {
+        this.emit(fromState, ctx.stateOrig.get(valLower)!, conds.concat(guard), stmtStart, ctx);
+      }
+      priorConds.push(condText);
+
+      const nextTok = nextTopLevel(pos);
+      if (!nextTok) return this.normalised.length; // malformed
+      const valText = this.originalAt(pos, nextTok.index - pos).trim();
+
+      if (nextTok.token === ';') {
+        const lastLower = valText.toLowerCase();
+        if (ctx.knownStates.has(lastLower)) {
+          const elseGuard = priorConds.map(c => this.negate(c));
+          this.emit(fromState, ctx.stateOrig.get(lastLower)!, conds.concat(elseGuard), stmtStart, ctx);
+        }
+        return nextTok.index + 1; // past ";"
+      }
+      if (nextTok.token !== 'when') return nextTok.index + nextTok.token.length; // malformed
+      curVal = valText;
+      pos = nextTok.index + 4; // past "when"
     }
   }
 
