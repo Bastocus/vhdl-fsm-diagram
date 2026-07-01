@@ -57,6 +57,16 @@ function parseCaseLineExpectation(source: string): number | null {
   return m ? Number(m[1]) : null;
 }
 
+/**
+ * `-- EXPECT_ERROR <substring>` asserts that result.errors contains at least one
+ * entry whose lowercased text includes the given lowercased substring.
+ * When present the fixture is allowed to have errors; when absent, any error fails.
+ */
+function parseErrorExpectation(source: string): string | null {
+  const m = source.match(/--\s*EXPECT_ERROR\s+(.+)/i);
+  return m ? m[1].trim() : null;
+}
+
 function matches(exp: Expected, tr: FsmTransition): boolean {
   if (norm(exp.from) !== norm(tr.from)) return false;
   if (norm(exp.to) !== norm(tr.to)) return false;
@@ -96,13 +106,17 @@ function main(): void {
     const source = fs.readFileSync(path.join(dir, file), 'utf8');
     const expected = parseExpectations(source);
     const expectedCaseLine = parseCaseLineExpectation(source);
+    const expectedError = parseErrorExpectation(source);
 
     const result = new VhdlFsmParser().parse(source);
     const actual = result.fsms.flatMap(f => f.transitions);
 
     const { missing, extra } = diff(expected, actual);
     const caseLineOk = expectedCaseLine === null || result.fsms[0]?.caseLine === expectedCaseLine;
-    const ok = missing.length === 0 && extra.length === 0 && result.errors.length === 0 && caseLineOk;
+    const errorOk = expectedError !== null
+      ? result.errors.some(e => e.toLowerCase().includes(expectedError.toLowerCase()))
+      : result.errors.length === 0;
+    const ok = missing.length === 0 && extra.length === 0 && errorOk && caseLineOk;
     const known = KNOWN_FAILS.has(base);
 
     if (ok) {
@@ -118,7 +132,11 @@ function main(): void {
 
     const tag = known ? 'XFAIL' : 'FAIL ';
     console.log(`  ${tag} ${file}`);
-    if (result.errors.length) console.log(`        errors: ${result.errors.join('; ')}`);
+    if (expectedError !== null && !errorOk) {
+      console.log(`        error expected: "${expectedError}", got: [${result.errors.join('; ')}]`);
+    } else if (result.errors.length && expectedError === null) {
+      console.log(`        errors: ${result.errors.join('; ')}`);
+    }
     for (const e of missing) console.log(`        missing: ${fmtExp(e)}`);
     for (const x of extra)   console.log(`        extra:   ${fmtTr(x)}`);
     if (!caseLineOk) console.log(`        caseLine: expected ${expectedCaseLine}, got ${result.fsms[0]?.caseLine}`);

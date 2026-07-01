@@ -1,5 +1,13 @@
 /**
- * VHDL FSM Parser  v1.7  (various-fixes Phase 6 — `case?` matching case statement)
+ * VHDL FSM Parser  v1.8  (review-fixes Phase 1 — mask block comments & string literals)
+ *
+ * Changes vs v1.7:
+ *  - `buildNormalised` rewritten as a single left-to-right pass that masks all three
+ *    "not code" span types with offset-preserving spaces (newlines kept): `--` line
+ *    comments, `/* … *​/` block comments (VHDL-2008, multi-line, non-nesting), and
+ *    `"…"` string literals (with `""` escaped-quote). Span precedence is decided by
+ *    whichever opens first, so keywords inside a comment/string can no longer be parsed
+ *    as VHDL and silently drop transitions.
  *
  * Changes vs v0.8:
  *  - New `expandRangePart(part, ctx)` helper: when a `when` arm label part matches
@@ -134,7 +142,8 @@ export class VhdlFsmParser {
       const fsmSignals       = this.extractFsmSignals(enumTypes);
 
       for (const sig of fsmSignals) {
-        const { transitions, selector, caseLine, stateLines } = this.extractTransitions(sig);
+        const { transitions, selector, caseLine, stateLines, errors: sigErrors } = this.extractTransitions(sig);
+        for (const e of sigErrors) result.errors.push(e);
         // An enum type that is never *assigned* a state (only read as a `case`
         // selector, e.g. an enum used purely to pick a branch) yields no transitions
         // and is not a state machine — skip it so it doesn't show as an empty FSM tab.
@@ -164,21 +173,58 @@ export class VhdlFsmParser {
     return result;
   }
 
-  // ── Normalisation: lowercase + pad comments with spaces ──────────────────
+  // ── Normalisation: lowercase + pad comments/strings with spaces ──────────
   // Padding (not stripping) preserves character offsets so that
   // normalised[i] === originalSource[i].toLowerCase() for code chars,
   // making it safe to use match.index to slice from originalSource.
+  //
+  // A single left-to-right pass masks the three "not code" spans so their
+  // contents can never be parsed as VHDL:
+  //   - `--` line comments (to end of line),
+  //   - `/* … */` block comments (VHDL-2008; multi-line, non-nesting),
+  //   - `"…"` double-quoted string literals (with `""` escaped-quote).
+  // Masked chars become spaces (newlines preserved so line numbers hold);
+  // code chars are lowercased. Precedence is decided by whichever span opens
+  // first — a `--` or `/*` inside a string is not a comment, and a `"` inside
+  // a comment is not a string.
   private buildNormalised(source: string): string {
-    return source
-      .split('\n')
-      .map(line => {
-        const ci = line.indexOf('--');
-        if (ci >= 0) {
-          return line.slice(0, ci).toLowerCase() + ' '.repeat(line.length - ci);
+    const out: string[] = new Array(source.length);
+    const SPACE = ' ';
+    let i = 0;
+    const n = source.length;
+    while (i < n) {
+      const ch = source[i];
+      // Line comment: `--` → space to end of line (keep the newline).
+      if (ch === '-' && source[i + 1] === '-') {
+        while (i < n && source[i] !== '\n') { out[i] = SPACE; i++; }
+        continue;
+      }
+      // Block comment: `/* … */` → space (keep newlines), first `*/` closes.
+      if (ch === '/' && source[i + 1] === '*') {
+        out[i] = SPACE; out[i + 1] = SPACE; i += 2;
+        while (i < n && !(source[i] === '*' && source[i + 1] === '/')) {
+          out[i] = source[i] === '\n' ? '\n' : SPACE; i++;
         }
-        return line.toLowerCase();
-      })
-      .join('\n');
+        if (i < n) { out[i] = SPACE; out[i + 1] = SPACE; i += 2; }
+        continue;
+      }
+      // String literal: `"…"` → space inside; `""` is an escaped quote.
+      if (ch === '"') {
+        out[i] = SPACE; i++;
+        while (i < n && source[i] !== '\n') {
+          if (source[i] === '"') {
+            if (source[i + 1] === '"') { out[i] = SPACE; out[i + 1] = SPACE; i += 2; continue; }
+            out[i] = SPACE; i++; break;   // closing quote
+          }
+          out[i] = SPACE; i++;
+        }
+        continue;
+      }
+      // Ordinary code char: lowercase, offsets preserved.
+      out[i] = ch === '\n' ? '\n' : ch.toLowerCase();
+      i++;
+    }
+    return out.join('');
   }
 
   // ── Entity / architecture names ──────────────────────────────────────────
@@ -251,7 +297,7 @@ export class VhdlFsmParser {
   // each arm body with an empty condition stack. Assignments to any group signal
   // count as transitions (so a two-process `next_state <= …` is captured).
   // Returns the original-case selector signal that headed the (first) matched case.
-  private extractTransitions(sig: FsmSignal): { transitions: FsmTransition[]; selector?: string; caseLine?: number; stateLines: Map<string, number> } {
+  private extractTransitions(sig: FsmSignal): { transitions: FsmTransition[]; selector?: string; caseLine?: number; stateLines: Map<string, number>; errors: string[] } {
     const ctx: FsmCtx = {
       assignSigs:  new Set(sig.names.map(s => s.toLowerCase())),
       knownStates: new Set(sig.states.map(s => s.toLowerCase())),
@@ -260,6 +306,7 @@ export class VhdlFsmParser {
       stateLines:  new Map(),
     };
 
+    const errors: string[] = [];
     const sigAlt = sig.names.map(s => escapeRegex(s.toLowerCase())).join('|');
     const headerRe = new RegExp(`\\bcase\\??\\s+(${sigAlt})\\s+is\\b`, 'g');
     let selector: string | undefined;
@@ -275,7 +322,10 @@ export class VhdlFsmParser {
       }
       const bodyStart = hm.index + hm[0].length;
       const bodyEnd   = this.findMatchingEndCase(bodyStart);
-      if (bodyEnd < 0) continue;
+      if (bodyEnd < 0) {
+        errors.push(`Unterminated 'case' starting at line ${thisCaseLine}`);
+        continue;
+      }
       const before = ctx.out.length;
       this.parseTopCase(bodyStart, bodyEnd, ctx);
       // Prefer the line of the first case block that actually assigns the FSM
@@ -290,7 +340,7 @@ export class VhdlFsmParser {
     if (selector === undefined && selInfo.selector !== undefined) selector = selInfo.selector;
     if (caseLine === undefined && selInfo.caseLine !== undefined) caseLine = selInfo.caseLine;
 
-    return { transitions: ctx.out, selector, caseLine: caseLine ?? fallbackCaseLine, stateLines: ctx.stateLines };
+    return { transitions: ctx.out, selector, caseLine: caseLine ?? fallbackCaseLine, stateLines: ctx.stateLines, errors };
   }
 
   /**

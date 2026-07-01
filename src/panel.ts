@@ -1,5 +1,7 @@
 import * as vscode from 'vscode';
+import * as crypto from 'crypto';
 import { ParsedFsm } from './parser';
+import { escapeHtml } from './panelHelpers';
 
 export class FsmPanel {
   public static currentPanel: FsmPanel | undefined;
@@ -88,12 +90,19 @@ export class FsmPanel {
   private _getHtml(fsms: ParsedFsm[], title: string): string {
     const themeHint = this._lightTheme === null ? 'auto'
                     : this._lightTheme ? 'light' : 'dark';
-    const fsmData       = JSON.stringify(fsms);
+    // Escape < > & so </script> / <!-- can never appear literally in the payload.
+    const fsmData = JSON.stringify(fsms)
+      .replace(/&/g, '\\u0026')
+      .replace(/</g, '\\u003c')
+      .replace(/>/g, '\\u003e');
+    // Per-render nonce for CSP — prevents injected scripts from running.
+    const nonce = crypto.randomBytes(16).toString('base64');
 
     return `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8"/>
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src-elem 'nonce-${nonce}'; script-src-attr 'unsafe-inline';">
 <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
 <title>FSM Diagram</title>
 <style>
@@ -225,7 +234,7 @@ body.light .tp-line-link:hover{color:#b45309;}
 <div class="header">
   <div class="header-icon">&#11041;</div>
   <div class="header-title">FSM Visualizer</div>
-  <div class="header-file">${esc(title)}</div>
+  <div class="header-file">${escapeHtml(title)}</div>
 </div>
 <div id="tab-bar" class="tab-bar"></div>
 <div id="toolbar" class="toolbar" style="display:none">
@@ -264,7 +273,7 @@ body.light .tp-line-link:hover{color:#b45309;}
 
 <div id="main-content" style="flex:1;display:flex;flex-direction:column;overflow:hidden;"></div>
 
-<script>
+<script nonce="${nonce}">
 /* ==========================================================================
    All SVG colours are plain hex strings in the C{} object.
    No CSS var() is used inside SVG attribute values.
@@ -1207,8 +1216,4 @@ render();
 </body>
 </html>`;
   }
-}
-
-function esc(s: string): string {
-  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
