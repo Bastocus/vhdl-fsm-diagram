@@ -142,7 +142,8 @@ export class VhdlFsmParser {
       const fsmSignals       = this.extractFsmSignals(enumTypes);
 
       for (const sig of fsmSignals) {
-        const { transitions, selector, caseLine, stateLines } = this.extractTransitions(sig);
+        const { transitions, selector, caseLine, stateLines, errors: sigErrors } = this.extractTransitions(sig);
+        for (const e of sigErrors) result.errors.push(e);
         // An enum type that is never *assigned* a state (only read as a `case`
         // selector, e.g. an enum used purely to pick a branch) yields no transitions
         // and is not a state machine — skip it so it doesn't show as an empty FSM tab.
@@ -296,7 +297,7 @@ export class VhdlFsmParser {
   // each arm body with an empty condition stack. Assignments to any group signal
   // count as transitions (so a two-process `next_state <= …` is captured).
   // Returns the original-case selector signal that headed the (first) matched case.
-  private extractTransitions(sig: FsmSignal): { transitions: FsmTransition[]; selector?: string; caseLine?: number; stateLines: Map<string, number> } {
+  private extractTransitions(sig: FsmSignal): { transitions: FsmTransition[]; selector?: string; caseLine?: number; stateLines: Map<string, number>; errors: string[] } {
     const ctx: FsmCtx = {
       assignSigs:  new Set(sig.names.map(s => s.toLowerCase())),
       knownStates: new Set(sig.states.map(s => s.toLowerCase())),
@@ -305,6 +306,7 @@ export class VhdlFsmParser {
       stateLines:  new Map(),
     };
 
+    const errors: string[] = [];
     const sigAlt = sig.names.map(s => escapeRegex(s.toLowerCase())).join('|');
     const headerRe = new RegExp(`\\bcase\\??\\s+(${sigAlt})\\s+is\\b`, 'g');
     let selector: string | undefined;
@@ -320,7 +322,10 @@ export class VhdlFsmParser {
       }
       const bodyStart = hm.index + hm[0].length;
       const bodyEnd   = this.findMatchingEndCase(bodyStart);
-      if (bodyEnd < 0) continue;
+      if (bodyEnd < 0) {
+        errors.push(`Unterminated 'case' starting at line ${thisCaseLine}`);
+        continue;
+      }
       const before = ctx.out.length;
       this.parseTopCase(bodyStart, bodyEnd, ctx);
       // Prefer the line of the first case block that actually assigns the FSM
@@ -335,7 +340,7 @@ export class VhdlFsmParser {
     if (selector === undefined && selInfo.selector !== undefined) selector = selInfo.selector;
     if (caseLine === undefined && selInfo.caseLine !== undefined) caseLine = selInfo.caseLine;
 
-    return { transitions: ctx.out, selector, caseLine: caseLine ?? fallbackCaseLine, stateLines: ctx.stateLines };
+    return { transitions: ctx.out, selector, caseLine: caseLine ?? fallbackCaseLine, stateLines: ctx.stateLines, errors };
   }
 
   /**
