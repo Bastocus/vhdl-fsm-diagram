@@ -1,5 +1,16 @@
 /**
- * VHDL FSM Parser  v0.8  (various-fixes Phase 3 — robust RHS: qualified/paren)
+ * VHDL FSM Parser  v0.9  (various-fixes Phase 4 — case choice ranges `a to b`)
+ *
+ * Changes vs v0.8:
+ *  - New `expandRangePart(part, ctx)` helper: when a `when` arm label part matches
+ *    `lo to hi` or `lo downto hi` and both endpoints are known states, expands to the
+ *    inclusive enum-order slice. Range parts are fed into the same per-state loops used
+ *    for `|` multi-label arms and added to `covered` so a sibling `when others` does
+ *    not over-expand.
+ *  - Applied symmetrically in `parseTopCase` (from-state expansion) and `parseCase`
+ *    (selector-condition expansion).
+ *
+ * Changes vs v0.8  (various-fixes Phase 3 — robust RHS: qualified/paren)
  *
  * Changes vs v0.7:
  *  - New `unwrapStateRhs(raw)` helper strips `type'(state)` qualified forms and
@@ -294,7 +305,12 @@ export class VhdlFsmParser {
       if (labelLower === 'others') continue;
       for (const part of labelLower.split('|')) {
         const p = part.trim();
-        if (ctx.knownStates.has(p)) covered.add(p);
+        const range = this.expandRangePart(p, ctx);
+        if (range.length > 0) {
+          for (const s of range) covered.add(s);
+        } else if (ctx.knownStates.has(p)) {
+          covered.add(p);
+        }
       }
     }
 
@@ -310,9 +326,12 @@ export class VhdlFsmParser {
       }
       for (const part of labelLower.split('|')) {
         const p = part.trim();
-        if (!ctx.knownStates.has(p)) continue;
-        if (!ctx.stateLines.has(p)) ctx.stateLines.set(p, this.offsetToLine(arm.labelStart));
-        this.parseStatements(arm.bodyStart, arm.bodyEnd, [], ctx.stateOrig.get(p)!, ctx);
+        const range = this.expandRangePart(p, ctx);
+        const states = range.length > 0 ? range : ctx.knownStates.has(p) ? [p] : [];
+        for (const stateLower of states) {
+          if (!ctx.stateLines.has(stateLower)) ctx.stateLines.set(stateLower, this.offsetToLine(arm.labelStart));
+          this.parseStatements(arm.bodyStart, arm.bodyEnd, [], ctx.stateOrig.get(stateLower)!, ctx);
+        }
       }
     }
   }
@@ -411,6 +430,28 @@ export class VhdlFsmParser {
     // bare identifier
     if (/^\w+$/.test(s)) return s.toLowerCase();
     return null;
+  }
+
+  /**
+   * Expand a single arm-label part that may be a range (`lo to hi` / `lo downto hi`).
+   * Returns the inclusive list of *lowercase* state names in declaration order (or
+   * reversed for `downto`). If the part is not a range, or its endpoints are not known
+   * states, returns an empty array (caller falls back to exact-match logic).
+   */
+  private expandRangePart(part: string, ctx: FsmCtx): string[] {
+    const m = /^(\w+)\s+(to|downto)\s+(\w+)$/i.exec(part.trim());
+    if (!m) return [];
+    const lo = m[1].toLowerCase();
+    const hi = m[3].toLowerCase();
+    const dir = m[2].toLowerCase();
+    const ordered = [...ctx.knownStates]; // insertion order = enum declaration order
+    const loIdx = ordered.indexOf(lo);
+    const hiIdx = ordered.indexOf(hi);
+    if (loIdx < 0 || hiIdx < 0) return [];
+    const [from, to] = dir === 'downto' ? [hiIdx, loIdx] : [loIdx, hiIdx];
+    if (from > to) return [];
+    const slice = ordered.slice(from, to + 1);
+    return dir === 'downto' ? slice.reverse() : slice;
   }
 
   /**
@@ -554,13 +595,22 @@ export class VhdlFsmParser {
     const sel  = this.fmtCond(this.originalAt(selStart, selLen));
     const arms = this.splitCaseArms(bodyStart, bodyEnd);
 
-    // Sibling concrete labels, used to build the `others` negation chain.
+    // Sibling concrete labels (original-case), used to build the `others` negation chain.
+    // Range parts are expanded to individual original-case state names.
     const covered: string[] = [];
     for (const a of arms) {
       const lower = this.normalised.slice(a.labelStart, a.labelStart + a.labelLen).trim();
       if (lower === 'others') continue;
       const orig = this.originalAt(a.labelStart, a.labelLen).trim();
-      for (const part of orig.split('|')) covered.push(part.trim());
+      for (const part of orig.split('|')) {
+        const partLower = part.trim().toLowerCase();
+        const range = this.expandRangePart(partLower, ctx);
+        if (range.length > 0) {
+          for (const s of range) covered.push(ctx.stateOrig.get(s)!);
+        } else {
+          covered.push(part.trim());
+        }
+      }
     }
 
     for (const a of arms) {
@@ -569,11 +619,22 @@ export class VhdlFsmParser {
       if (lower === 'others') {
         selConds = covered.map(v => this.negate(`${sel} = ${v}`));
       } else {
-        const parts = this.originalAt(a.labelStart, a.labelLen).trim()
-          .split('|').map(s => s.trim()).filter(Boolean);
-        selConds = parts.length === 1
-          ? [`${sel} = ${parts[0]}`]
-          : ['(' + parts.map(v => `${sel} = ${v}`).join(' or ') + ')'];
+        // Expand each part (may be a range), collect original-case state names.
+        const orig = this.originalAt(a.labelStart, a.labelLen).trim();
+        const expanded: string[] = [];
+        for (const part of orig.split('|')) {
+          const partLower = part.trim().toLowerCase();
+          const range = this.expandRangePart(partLower, ctx);
+          if (range.length > 0) {
+            for (const s of range) expanded.push(ctx.stateOrig.get(s)!);
+          } else {
+            expanded.push(part.trim());
+          }
+        }
+        const filtered = expanded.filter(Boolean);
+        selConds = filtered.length === 1
+          ? [`${sel} = ${filtered[0]}`]
+          : ['(' + filtered.map(v => `${sel} = ${v}`).join(' or ') + ')'];
       }
       this.parseStatements(a.bodyStart, a.bodyEnd, conds.concat(selConds), fromState, ctx);
     }
